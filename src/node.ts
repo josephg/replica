@@ -5,13 +5,49 @@ import * as ss from './fancydb/stateset'
 import * as causalGraph from './fancydb/causal-graph'
 import handle from './jsonlines'
 import { LV, Primitive, RawVersion, ROOT_LV, VersionSummary } from './types'
-import { createAgent } from './utils'
+import { createAgent, rateLimit } from './utils'
 import { finished } from 'stream'
 import repl from 'node:repl'
+import fs from 'node:fs'
 
 let agent = createAgent()
 
 let db = ss.create()
+
+let filename: string | null = null
+const loadFromFile = (f: string) => {
+  try {
+    const dataStr = fs.readFileSync(f, 'utf-8')
+    const data = JSON.parse(dataStr)
+    ss.mergeDelta(db, data)
+    console.log('Loaded from', f)
+  } catch (e: any) {
+    if (e.code !== 'ENOENT') throw e
+
+    console.log('Using new database file')
+  }
+
+  filename = f
+}
+
+const save = rateLimit(100, () => {
+  if (filename != null) {
+    console.log('Saving to', filename)
+    const data = ss.deltaSince(db, [])
+    const dataStr = JSON.stringify(data) + '\n'
+    fs.writeFileSync(filename, dataStr)
+  }
+})
+
+process.on('exit', () => {
+  save.flushSync()
+})
+
+process.on('SIGINT', () => {
+  // Catching this to make sure we save!
+  // console.log('SIGINT!')
+  process.exit(1)
+})
 
 // if (dt.get(db).time == null) {
 //   console.log('Setting time = 0')
@@ -34,10 +70,11 @@ type Msg = [
 ]
 
 const dbListeners = new Set<() => void>()
-const triggerListeners = () => {
+const dbDidChange = () => {
   console.log('BROADCAST')
   console.dir(db.values, {depth:null})
   for (const l of dbListeners) l()
+  save()
 }
 
 const runProtocol = (sock: Socket) => {
@@ -80,7 +117,7 @@ const runProtocol = (sock: Socket) => {
   }
 
   finished(sock, () => {
-    console.log('finished')
+    console.log('Socket closed', sock.remoteAddress, sock.remotePort)
     dbListeners.delete(onVersionChanged)
   })
 
@@ -138,7 +175,7 @@ const runProtocol = (sock: Socket) => {
         // sufficient.
         state.unknownVersions = null
 
-        if (updated[0] !== updated[1]) triggerListeners()
+        if (updated[0] !== updated[1]) dbDidChange()
         // TODO: Send ack??
         break
       }
@@ -174,7 +211,7 @@ for (let i = 2; i < process.argv.length; i++) {
   const command = process.argv[i]
   switch (command) {
     case '-l': {
-      const port = +process.argv[i+1]
+      const port = +process.argv[++i]
       if (port === 0 || isNaN(port)) throw Error('Invalid port (usage -l <PORT>)')
 
       serverOnPort(port)
@@ -182,13 +219,25 @@ for (let i = 2; i < process.argv.length; i++) {
     }
 
     case '-c': {
-      const host = process.argv[i+1]
+      const host = process.argv[++i]
       if (host == null) throw Error('Missing host to connect to! (usage -c <HOST> <PORT>')
-      const port = +process.argv[i+2]
+      const port = +process.argv[++i]
       if (port === 0 || isNaN(port)) throw Error('Invalid port (usage -c <HOST> <PORT>)')
 
       connect(host, port)
       console.log('connect', host, port)
+      break
+    }
+
+    case '-f': {
+      const f = process.argv[++i]
+      loadFromFile(f)
+
+      break
+    }
+
+    default: {
+      throw Error(`Unknown command line argument '${command}'`)
     }
   }
   // console.log(process.argv[i])
@@ -210,7 +259,7 @@ r.context.i = (val: Primitive) => {
   const lv = ss.localInsert(db, version, val)
   console.log(`Inserted ${version[0]}/${version[1]} (LV ${lv})`, val)
 
-  triggerListeners()
+  dbDidChange()
 }
 
 r.context.s = (key: LV, val: Primitive) => {
@@ -218,7 +267,7 @@ r.context.s = (key: LV, val: Primitive) => {
   const lv = ss.localSet(db, version, key, val)
   console.log(`Set ${version[0]}/${version[1]} (LV ${lv})`, val)
 
-  triggerListeners()
+  dbDidChange()
 }
 
 r.once('exit', () => {
