@@ -299,52 +299,76 @@ const eachVersionBetween = (cg: CausalGraph, vStart: LV, vEnd: LV, visit: (e: CG
   }
 }
 
-export const intersectWithSummary = (cg: CausalGraph, summary: VersionSummary): LV[] => {
-  // We'll gather all the potentially interesting versions here, then use findDominators
-  // to discard any which are dominated by other versions. (THIS WILL BE COMMON!)
-  const versions: LV[] = []
+/** version is -1 when the seq does not overlap. Each yield is guaranteed to be a version run. */
+type IntersectVisitor = (agent: string, startSeq: number, endSeq: number, version: number) => void
 
+/** Scan the VersionSummary and report (via visitor function) which versions overlap */
+const intersectWithSummaryFull = (cg: CausalGraph, summary: VersionSummary, visit: IntersectVisitor) => {
   for (const agent in summary) {
     const clientEntries = cg.agentToVersion[agent]
-    if (clientEntries == null) continue
 
     for (let [startSeq, endSeq] of summary[agent]) {
       // This is a bit tricky, because a single item in ClientEntry might span multiple
       // entries.
 
-      let idx = bs(clientEntries, startSeq, (entry, needle) => (
-        needle < entry.seq ? 1
-          : needle >= entry.seqEnd ? -1
-          : 0
-      ))
+      if (clientEntries != null) {
+        let idx = bs(clientEntries, startSeq, (entry, needle) => (
+          needle < entry.seq ? 1
+            : needle >= entry.seqEnd ? -1
+            : 0
+        ))
 
-      if (idx < 0) idx = -idx - 1
+        // If startSeq isn't found, start at the next entry.
+        if (idx < 0) idx = -idx - 1
 
-      for (; idx < clientEntries.length; idx++) {
-        const ce = clientEntries[idx]
-        if (ce.seq >= endSeq) break
+        for (; idx < clientEntries.length; idx++) {
+          const ce = clientEntries[idx]
+          if (ce.seq >= endSeq) break
 
-        const s = max2(ce.seq, startSeq)
-        const offset = s - ce.seq
+          if (ce.seq > startSeq) {
+            visit(agent, startSeq, ce.seq, -1)
+            startSeq = ce.seq
+          }
 
-        const versionStart = ce.version + offset
+          const seqOffset = startSeq - ce.seq
+          const versionStart = ce.version + seqOffset
 
-        const end = min2(ce.seqEnd, endSeq)
-        const versionEnd = ce.version + (end - ce.seq)
+          const localSeqEnd = min2(ce.seqEnd, endSeq)
 
-        // Ok, now we go through everything from versionStart to versionEnd! Wild.
-        eachVersionBetween(cg, versionStart, versionEnd, (e, vs, ve) => {
-          // const v = min2(e.vEnd, versionEnd)
-          if (ve - 1 < e.version) throw Error('Invalid state')
-          versions.push(ve - 1)
-        })
+          visit(agent, startSeq, localSeqEnd, versionStart)
+
+          startSeq = localSeqEnd
+        }
       }
 
+
+      if (startSeq < endSeq) visit(agent, startSeq, endSeq, -1)
     }
   }
+}
 
-  // console.log('versions', versions)
-  return findDominators(cg, versions)
+/** Yields the intersection and "remainder" (if any) */
+export const intersectWithSummary = (cg: CausalGraph, summary: VersionSummary, versions: LV[] = []): [LV[], VersionSummary | null] => {
+  let remainder: null | VersionSummary = null
+
+  intersectWithSummaryFull(cg, summary, (agent, startSeq, endSeq, versionStart) => {
+    if (versionStart >= 0) {
+      const versionEnd = versionStart + (endSeq - startSeq)
+
+      // Ok, now we go through everything from versionStart to versionEnd! Wild.
+      eachVersionBetween(cg, versionStart, versionEnd, (e, vs, ve) => {
+        const vLast = ve - 1
+        if (vLast < e.version) throw Error('Invalid state')
+        versions.push(vLast)
+      })
+    } else {
+      remainder ??= {}
+      const a = (remainder[agent] ??= [])
+      a.push([startSeq, endSeq])
+    }
+  })
+
+  return [findDominators(cg, versions), remainder]
 }
 
 // *** TOOLS ***
@@ -778,6 +802,7 @@ export function advanceVersionFromSerialized(cg: CausalGraph, data: PartialSeria
     version = advanceFrontier(version, vLast, parents)
   }
 
+  // NOTE: Callers might need to call findDominators on the result.
   return version
 }
 
@@ -819,8 +844,14 @@ export function advanceVersionFromSerialized(cg: CausalGraph, data: PartialSeria
 
 //   console.dir(cg, {depth:null})
 
-//   console.dir(intersectWithSummary(cg, {
+//   const summary: VersionSummary = {
 //     a: [[0, 6]],
 //     b: [[0, 100]],
-//   }), {depth: null})
+//   }
+//   intersectWithSummaryFull(cg, summary, (agent, start, end, v) => {
+//     console.log(agent, start, end, v)
+//   })
+
+//   // [15]
+//   console.dir(intersectWithSummary(cg, summary), {depth: null})
 // })()

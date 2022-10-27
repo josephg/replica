@@ -41,27 +41,47 @@ const triggerListeners = () => {
 }
 
 const runProtocol = (sock: Socket) => {
-  let remoteVersion: LV[] | null = null
+  type ProtocolState = {state: 'waitingForVersion'}
+    | {
+      state: 'established',
+      remoteVersion: LV[],
+      unknownVersions: VersionSummary | null
+    }
 
-  const sendDelta = (v: LV[] | null = remoteVersion) => {
-    if (v == null) return
-    console.log('sending delta to', sock.remoteAddress, sock.remotePort, 'since', v)
-    const delta = ss.deltaSince(db, v)
+  let state: ProtocolState = {state: 'waitingForVersion'}
+
+  const sendDelta = (sinceVersion: LV[]) => {
+    console.log('sending delta to', sock.remoteAddress, sock.remotePort, 'since', sinceVersion)
+    const delta = ss.deltaSince(db, sinceVersion)
     handler.write(['delta', delta])
-    remoteVersion = db.cg.version.slice()
+    // remoteVersion = db.cg.version.slice()
   }
 
-  const sendChanges = () => {
-    console.log('sendChanges')
+  const onVersionChanged = () => {
+    console.log('onVersionChanged')
+    if (state.state !== 'established') throw Error('Unexpected connection state')
 
-    if (remoteVersion != null && !causalGraph.lvEq(remoteVersion, db.cg.version)) {
-      sendDelta()
+    if (state.unknownVersions != null) {
+      // The db might now include part of the remainder. Doing this works
+      // around a bug where connecting to 2 computers will result in
+      // re-sending known changes back to them.
+      // console.log('unknown', state.unknownVersions)
+      ;[state.remoteVersion, state.unknownVersions] = causalGraph.intersectWithSummary(
+        db.cg, state.unknownVersions, state.remoteVersion
+      )
+      // console.log('->known', state.unknownVersions)
+    }
+
+    if (!causalGraph.lvEq(state.remoteVersion, db.cg.version)) {
+      sendDelta(state.remoteVersion)
+      // The version will always (& only) advance forward.
+      state.remoteVersion = db.cg.version.slice()
     }
   }
 
   finished(sock, () => {
     console.log('finished')
-    dbListeners.delete(sendChanges)
+    dbListeners.delete(onVersionChanged)
   })
 
   const handler = handle<Msg, Msg>(sock, msg => {
@@ -71,17 +91,32 @@ const runProtocol = (sock: Socket) => {
     const type = msg[0]
     switch (type) {
       case 'known version': {
+        if (state.state !== 'waitingForVersion') throw Error('Unexpected connection state')
+
         // When we get the known version, we always send a delta so the remote
         // knows they're up to date (even if they were already anyway).
         const summary = msg[1]
-        const sv = causalGraph.intersectWithSummary(db.cg, summary)
+        const [sv, remainder] = causalGraph.intersectWithSummary(db.cg, summary)
         console.log('known version', sv)
-        sendDelta(sv)
-        dbListeners.add(sendChanges) // Only matters the first time.
+        if (!causalGraph.lvEq(sv, db.cg.version)) {
+          // We could always send the delta here to let the remote peer know they're
+          // up to date, but they can figure that out by looking at the known version
+          // we send on first connect.
+          sendDelta(sv)
+        }
+
+        state = {
+          state: 'established',
+          remoteVersion: sv,
+          unknownVersions: remainder
+        }
+
+        dbListeners.add(onVersionChanged) // Only matters the first time.
         break
       }
+
       case 'delta': {
-        if (remoteVersion == null) throw Error('Invalid state - missing known version')
+        if (state.state !== 'established') throw Error('Invalid state')
 
         const delta = msg[1]
         // console.log('got delta')
@@ -91,18 +126,23 @@ const runProtocol = (sock: Socket) => {
         // console.dir(db.values, {depth:null})
 
         // console.log('== v', remoteVersion, delta.cg)
-        remoteVersion = causalGraph.advanceVersionFromSerialized(
-          db.cg, delta.cg, remoteVersion
+        state.remoteVersion = causalGraph.advanceVersionFromSerialized(
+          db.cg, delta.cg, state.remoteVersion
         )
-        // TODO: Ideally, this shouldn't be necessary!
-        // console.log('1> v', remoteVersion)
-        remoteVersion = causalGraph.findDominators(db.cg, remoteVersion)
-        // console.log('-> v', remoteVersion)
+        // TODO: Ideally, this shouldn't be necessary! But it is because the remoteVersion
+        // gets updated as a result of versions *we* send.
+        state.remoteVersion = causalGraph.findDominators(db.cg, state.remoteVersion)
+
+        // Presumably the remote peer has just sent us all the data it has that we were
+        // missing. I could call intersectWithSummary2 here, but this should be
+        // sufficient.
+        state.unknownVersions = null
 
         if (updated[0] !== updated[1]) triggerListeners()
         // TODO: Send ack??
         break
       }
+
       default: console.warn('Unknown message type:', type)
     }
   })
@@ -129,6 +169,7 @@ const connect = (host: string, port: number) => {
   })
 }
 
+// ***** Command line argument passing
 for (let i = 2; i < process.argv.length; i++) {
   const command = process.argv[i]
   switch (command) {
@@ -153,6 +194,7 @@ for (let i = 2; i < process.argv.length; i++) {
   // console.log(process.argv[i])
 }
 
+// ***** REPL
 const r = repl.start({
   prompt: '> ',
   useColors: true,
