@@ -1,6 +1,7 @@
 import { LV, RawVersion, VersionSummary } from "./types"
 
-export function createAgent(name?: string): () => RawVersion {
+export type AgentGenerator = () => RawVersion
+export function createAgent(name?: string): AgentGenerator {
   const agent = name ?? Math.random().toString(36).slice(2)
   let seq = 0
   return () => ([agent, seq++])

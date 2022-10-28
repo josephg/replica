@@ -5,13 +5,13 @@ import bs from 'binary-search'
 import assert from 'assert/strict'
 import { assertSorted, createAgent } from "../utils"
 
-type Pair = [LV, Primitive]
-type RawPair = [RawVersion, Primitive]
+type Pair<T=Primitive> = [LV, T]
+type RawPair<T=Primitive> = [RawVersion, T]
 
-export interface StateSet {
+export interface StateSet<T=Primitive> {
   // ID -> [current value, current version] pairs.
   // NOTE: This is a MV register which only (always) stores primitive values.
-  values: Map<LV, AtLeast1<Pair>>,
+  values: Map<LV, AtLeast1<Pair<T>>>,
 
   // This is an index to quickly find the items to send when syncing.
   // Each value exists in this list once for each version it has.
@@ -23,7 +23,7 @@ export interface StateSet {
   cg: CausalGraph,
 }
 
-export function create(): StateSet {
+export function create<T=Primitive>(): StateSet<T> {
   return {
     values: new Map(),
     index: [],
@@ -31,7 +31,7 @@ export function create(): StateSet {
   }
 }
 
-function rawLookup(crdt: StateSet, v: LV): number {
+function rawLookup<T>(crdt: StateSet<T>, v: LV): number {
   return bs(crdt.index, v, (entry, needle) => entry.v - needle)
 }
 
@@ -58,7 +58,7 @@ function addIndex(crdt: StateSet, v: LV, key: LV) {
   }
 }
 
-export function localSet(crdt: StateSet, version: RawVersion, key: LV | -1, value: Primitive): LV {
+export function localSet<T>(crdt: StateSet<T>, version: RawVersion, key: LV | -1, value: T): LV {
   const lv = causalGraph.addRaw(crdt.cg, version)
   if (key == -1) key = lv
 
@@ -82,10 +82,24 @@ export function localSet(crdt: StateSet, version: RawVersion, key: LV | -1, valu
   return lv
 }
 
-export function localInsert(crdt: StateSet, version: RawVersion, value: Primitive): LV {
+export function localInsert<T>(crdt: StateSet<T>, version: RawVersion, value: T): LV {
   return localSet(crdt, version, -1, value)
 }
 
+/** Get a list of the keys which have been modified in the range of [since..] */
+export function modifiedKeysSince<T>(crdt: StateSet<T>, since: LV): LV[] {
+  let idx = rawLookup(crdt, since)
+  if (idx < 0) idx = -idx - 1
+
+  const result = new Set<LV>() // To uniq() the results.
+  for (; idx < crdt.index.length; idx++) {
+    const {key} = crdt.index[idx]
+    result.add(key)
+  }
+  return Array.from(result)
+}
+
+// *** Remote state ***
 export type RemoteStateDelta = {
   cg: causalGraph.PartialSerializedCGV1,
 
@@ -94,7 +108,6 @@ export type RemoteStateDelta = {
     pairs: AtLeast1<RawPair>, // This could be optimized by referencing cg below.
   ][],
 }
-
 
 function mergeSet(crdt: StateSet, keyRaw: RawVersion, givenRawPairs: AtLeast1<RawPair>) {
   // const lv = causalGraph.addRaw(crdt.cg, version, 1, parents)
@@ -213,6 +226,12 @@ function check(crdt: StateSet) {
   }
 
   assert.equal(expectedIdxSize, crdt.index.length)
+}
+
+export function get<T>(crdt: StateSet<T>, key: LV): T[] {
+  const pairs = (crdt.values.get(key) ?? []) as Pair<T>[]
+
+  return pairs.map(([_, val]) => val)
 }
 
 // ;(() => {

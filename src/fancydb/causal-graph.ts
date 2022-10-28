@@ -239,6 +239,7 @@ export const lvToRaw = (cg: CausalGraph, v: LV): RawVersion => {
 export const lvToRawList = (cg: CausalGraph, parents: LV[]): RawVersion[] => (
   parents.map(v => lvToRaw(cg, v))
 )
+export const getRawVersion = (cg: CausalGraph): RawVersion[] => lvToRawList(cg, cg.version)
 
 
 // export const getParents = (cg: CausalGraph, v: LV): LV[] => (

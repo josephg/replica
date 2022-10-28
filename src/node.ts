@@ -1,25 +1,45 @@
 import {default as net} from 'net'
 import { Socket } from 'net'
-// import * as dt from './fancydb'
+import * as dt from './fancydb'
 import * as ss from './fancydb/stateset'
 import * as causalGraph from './fancydb/causal-graph'
 import handle from './jsonlines'
 import { LV, Primitive, RawVersion, ROOT_LV, VersionSummary } from './types'
-import { createAgent, rateLimit } from './utils'
+import { AgentGenerator, createAgent, rateLimit } from './utils'
 import { finished } from 'stream'
 import repl from 'node:repl'
 import fs from 'node:fs'
 
-let agent = createAgent()
 
-let db = ss.create()
+// interface Doc {
+//   cg: causalGraph.CausalGraph,
+//   version: LV[],
+//   // participants: null,
+//   // type: string,
+//   data: Primitive,
+// }
+
+type InboxEntry = {
+  v: RawVersion[],
+  // type: string,
+}
+
+let inboxAgent = createAgent()
+
+
+
+let inbox = ss.create<InboxEntry>()
+const docs = new Map<LV, {
+  agent: AgentGenerator,
+  doc: dt.FancyDB
+}>()
 
 let filename: string | null = null
 const loadFromFile = (f: string) => {
   try {
     const dataStr = fs.readFileSync(f, 'utf-8')
     const data = JSON.parse(dataStr)
-    ss.mergeDelta(db, data)
+    ss.mergeDelta(inbox, data)
     console.log('Loaded from', f)
   } catch (e: any) {
     if (e.code !== 'ENOENT') throw e
@@ -33,7 +53,7 @@ const loadFromFile = (f: string) => {
 const save = rateLimit(100, () => {
   if (filename != null) {
     console.log('Saving to', filename)
-    const data = ss.deltaSince(db, [])
+    const data = ss.deltaSince(inbox, [])
     const dataStr = JSON.stringify(data) + '\n'
     fs.writeFileSync(filename, dataStr)
   }
@@ -59,20 +79,30 @@ process.on('SIGINT', () => {
 // const port = +(process.env.PORT ?? '8008')
 
 type Msg = [
-  type: 'known version',
+  type: 'known idx version',
   vs: VersionSummary
 ] | [
-  type: 'delta',
+  type: 'idx delta',
   delta: ss.RemoteStateDelta
 ] | [
+  // Get the changes to a document since the named version.
+  type: 'get doc',
+  k: RawVersion,
+  since: VersionSummary, // OPT: Could probably just send the version here most of the time.
+] | [
+  type: 'doc delta',
+  k: RawVersion,
+  delta: dt.PSerializedFancyDBv1
+] | [
+  // Unused!
   type: 'ack',
   v: RawVersion[]
 ]
 
 const dbListeners = new Set<() => void>()
-const dbDidChange = () => {
+const indexDidChange = () => {
   console.log('BROADCAST')
-  console.dir(db.values, {depth:null})
+  console.dir(inbox.values, {depth:null})
   for (const l of dbListeners) l()
   save()
 }
@@ -89,8 +119,8 @@ const runProtocol = (sock: Socket) => {
 
   const sendDelta = (sinceVersion: LV[]) => {
     console.log('sending delta to', sock.remoteAddress, sock.remotePort, 'since', sinceVersion)
-    const delta = ss.deltaSince(db, sinceVersion)
-    handler.write(['delta', delta])
+    const delta = ss.deltaSince(inbox, sinceVersion)
+    handler.write(['idx delta', delta])
     // remoteVersion = db.cg.version.slice()
   }
 
@@ -104,15 +134,15 @@ const runProtocol = (sock: Socket) => {
       // re-sending known changes back to them.
       // console.log('unknown', state.unknownVersions)
       ;[state.remoteVersion, state.unknownVersions] = causalGraph.intersectWithSummary(
-        db.cg, state.unknownVersions, state.remoteVersion
+        inbox.cg, state.unknownVersions, state.remoteVersion
       )
       // console.log('->known', state.unknownVersions)
     }
 
-    if (!causalGraph.lvEq(state.remoteVersion, db.cg.version)) {
+    if (!causalGraph.lvEq(state.remoteVersion, inbox.cg.version)) {
       sendDelta(state.remoteVersion)
       // The version will always (& only) advance forward.
-      state.remoteVersion = db.cg.version.slice()
+      state.remoteVersion = inbox.cg.version.slice()
     }
   }
 
@@ -127,17 +157,17 @@ const runProtocol = (sock: Socket) => {
 
     const type = msg[0]
     switch (type) {
-      case 'known version': {
+      case 'known idx version': {
         if (state.state !== 'waitingForVersion') throw Error('Unexpected connection state')
 
-        // When we get the known version, we always send a delta so the remote
+        // When we get the known idx version, we always send a delta so the remote
         // knows they're up to date (even if they were already anyway).
         const summary = msg[1]
-        const [sv, remainder] = causalGraph.intersectWithSummary(db.cg, summary)
-        console.log('known version', sv)
-        if (!causalGraph.lvEq(sv, db.cg.version)) {
+        const [sv, remainder] = causalGraph.intersectWithSummary(inbox.cg, summary)
+        console.log('known idx version', sv)
+        if (!causalGraph.lvEq(sv, inbox.cg.version)) {
           // We could always send the delta here to let the remote peer know they're
-          // up to date, but they can figure that out by looking at the known version
+          // up to date, but they can figure that out by looking at the known idx version
           // we send on first connect.
           sendDelta(sv)
         }
@@ -152,39 +182,91 @@ const runProtocol = (sock: Socket) => {
         break
       }
 
-      case 'delta': {
+      case 'idx delta': {
         if (state.state !== 'established') throw Error('Invalid state')
 
         const delta = msg[1]
         // console.log('got delta')
         // console.dir(delta, {depth:null})
-        const updated = ss.mergeDelta(db, delta)
+        const updated = ss.mergeDelta(inbox, delta)
         // console.log('Merged data')
         // console.dir(db.values, {depth:null})
 
         // console.log('== v', remoteVersion, delta.cg)
         state.remoteVersion = causalGraph.advanceVersionFromSerialized(
-          db.cg, delta.cg, state.remoteVersion
+          inbox.cg, delta.cg, state.remoteVersion
         )
         // TODO: Ideally, this shouldn't be necessary! But it is because the remoteVersion
         // gets updated as a result of versions *we* send.
-        state.remoteVersion = causalGraph.findDominators(db.cg, state.remoteVersion)
+        state.remoteVersion = causalGraph.findDominators(inbox.cg, state.remoteVersion)
 
         // Presumably the remote peer has just sent us all the data it has that we were
         // missing. I could call intersectWithSummary2 here, but this should be
         // sufficient.
         state.unknownVersions = null
 
-        if (updated[0] !== updated[1]) dbDidChange()
+        if (updated[0] !== updated[1]) {
+          const keys = ss.modifiedKeysSince(inbox, updated[0])
+          for (const k of keys) {
+            // NOTE: Version here might have duplicate entries!
+            // const version = ss.get(inbox, k).flatMap(data => data.v)
+
+            const doc = docs.get(k)
+            const kRaw = causalGraph.lvToRaw(inbox.cg, k)
+            const vs = doc ? causalGraph.summarizeVersion(doc.doc.cg) : {}
+            console.log('Requesting updated info on doc', k, kRaw, 'since', vs)
+            handler.write(['get doc', kRaw, vs])
+          }
+
+          // Uhhh should this wait until we've got the requested changes?
+          indexDidChange()
+        }
         // TODO: Send ack??
         break
+      }
+
+      case 'get doc': {
+        // Get the changes to the given document at some point in time
+        const kRaw = msg[1]
+        const vs = msg[2]
+
+        const k = causalGraph.rawToLV2(inbox.cg, kRaw)
+        const doc = docs.get(k)
+        if (doc == null) throw Error('Requested unknown doc??')
+
+        const commonVersion = causalGraph.intersectWithSummary(doc.doc.cg, vs)[0]
+        const partial = dt.serializePartialSince(doc.doc, commonVersion)
+
+        handler.write(['doc delta', kRaw, partial])
+
+        break
+      }
+
+      case 'doc delta': {
+        // Merge the changes to the specified doc
+        const kRaw = msg[1]
+        const partial = msg[2]
+
+        const k = causalGraph.rawToLV2(inbox.cg, kRaw)
+
+        let doc = docs.get(k)
+        if (doc == null) {
+          doc = {
+            agent: createAgent(),
+            doc: dt.createDb()
+          }
+          docs.set(k, doc)
+        }
+
+        dt.mergePartialSerialized(doc.doc, partial)
+        console.log('doc', k, 'now has value', dt.get(doc.doc))
       }
 
       default: console.warn('Unknown message type:', type)
     }
   })
 
-  handler.write(['known version', causalGraph.summarizeVersion(db.cg)])
+  handler.write(['known idx version', causalGraph.summarizeVersion(inbox.cg)])
 }
 
 const serverOnPort = (port: number) => {
@@ -251,25 +333,71 @@ const r = repl.start({
   // completer: true,
 
 })
-r.context.db = db
+r.context.inbox = inbox
+r.context.docs = docs
 r.context.ss = ss
+r.context.dt = dt
 
-r.context.i = (val: Primitive) => {
-  const version = agent()
-  const lv = ss.localInsert(db, version, val)
-  console.log(`Inserted ${version[0]}/${version[1]} (LV ${lv})`, val)
-
-  dbDidChange()
+r.context.getDoc = (key: LV) => {
+  const doc = docs.get(key)
+  if (doc == null) throw Error('Missing doc')
+  return dt.get(doc.doc)
 }
 
-r.context.s = (key: LV, val: Primitive) => {
-  const version = agent()
-  const lv = ss.localSet(db, version, key, val)
-  console.log(`Set ${version[0]}/${version[1]} (LV ${lv})`, val)
+// r.context.i = (val: Primitive) => {
+//   const version = agent()
+//   const lv = ss.localInsert(inbox, version, val)
+//   console.log(`Inserted ${version[0]}/${version[1]} (LV ${lv})`, val)
 
-  dbDidChange()
+//   dbDidChange()
+// }
+
+r.context.i = (data: Primitive) => {
+  // We'll reuse the version for the document name. It shows up as a key in
+  // the inbox as well.
+  const docKey = inboxAgent()
+
+  const doc = dt.createDb()
+  const docAgent = createAgent()
+  dt.recursivelySetRoot(doc, docAgent, {
+    type: 'unknown',
+    data,
+  })
+
+  const lv = ss.localInsert(inbox, docKey, {
+    v: causalGraph.getRawVersion(doc.cg)
+  })
+
+  docs.set(lv, {
+    agent: docAgent,
+    doc
+  })
+
+  // console.dir(doc, {depth:null})
+
+  console.log(`Inserted ${docKey[0]}/${docKey[1]} (LV ${lv})`, data)
+
+  indexDidChange()
+}
+
+r.context.s = (docKey: LV, val: Primitive) => {
+  const doc = docs.get(docKey)
+  if (doc == null) throw Error('Missing or invalid key')
+
+  dt.recursivelySetRoot(doc.doc, doc.agent, {data: val})
+  console.log(dt.get(doc.doc))
+
+  const version = inboxAgent()
+  const lv = ss.localSet(inbox, version, docKey, {
+    v: causalGraph.getRawVersion(doc.doc.cg)
+  })
+
+  console.log(`Set ${docKey} data`, val)
+  indexDidChange()
 }
 
 r.once('exit', () => {
   process.exit(0)
 })
+
+// r.context.i({oh: 'hai'})
