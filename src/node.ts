@@ -113,7 +113,16 @@ const indexDidChange = () => {
   save()
 }
 
-const runProtocol = (sock: Socket) => {
+const resolvable = <T = void>(): {promise: Promise<T>, resolve(val: T): void, reject(val: any): void} => {
+  let resolve: any, reject: any
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return {promise, resolve, reject}
+}
+
+const runProtocol = (sock: Socket): Promise<void> => {
   type ProtocolState = {state: 'waitingForVersion'}
     | {
       state: 'established',
@@ -152,14 +161,19 @@ const runProtocol = (sock: Socket) => {
     }
   }
 
-  finished(sock, () => {
+  const finishPromise = resolvable()
+
+  finished(sock, (err) => {
     console.log('Socket closed', sock.remoteAddress, sock.remotePort)
     dbListeners.delete(onVersionChanged)
+
+    if (err) finishPromise.reject(err)
+    else finishPromise.resolve()
   })
 
   const handler = handle<Msg, Msg>(sock, msg => {
-    console.log('msg from', sock.remoteAddress, sock.remotePort)
-    console.dir(msg, {depth:null})
+    console.log('msg', msg[0], 'from', sock.remoteAddress, sock.remotePort)
+    // console.dir(msg, {depth:null})
 
     const type = msg[0]
     switch (type) {
@@ -266,6 +280,7 @@ const runProtocol = (sock: Socket) => {
 
         dt.mergePartialSerialized(doc.doc, partial)
         console.log('doc', k, 'now has value', dt.get(doc.doc))
+        break
       }
 
       default: console.warn('Unknown message type:', type)
@@ -273,6 +288,8 @@ const runProtocol = (sock: Socket) => {
   })
 
   handler.write(['known idx version', causalGraph.summarizeVersion(inbox.cg)])
+
+  return finishPromise.promise
 }
 
 const serverOnPort = (port: number) => {
@@ -287,11 +304,37 @@ const serverOnPort = (port: number) => {
   })
 }
 
-const connect = (host: string, port: number) => {
+const connect1 = (host: string, port: number) => {
   const sock = net.connect({port, host}, () => {
     console.log('connected!')
     runProtocol(sock)
   })
+}
+
+const wait = (timeout: number) => new Promise((res) => setTimeout(res, timeout))
+
+const connect = (host: string, port: number) => {
+  ;(async () => {
+    while (true) {
+      console.log('Connecting to', host, port, '...')
+      const socket = new net.Socket()
+      const connectPromise = resolvable()
+      socket.once('connect', connectPromise.resolve)
+      socket.once('error', connectPromise.reject)
+      socket.connect({port, host})
+
+      try {
+        await connectPromise.promise
+        socket.removeListener('error', connectPromise.reject)
+        await runProtocol(socket)
+      } catch (e: any) {
+        console.warn('Could not connect:', e.message)
+      }
+
+      console.log('Reconnecting in 3 seconds...')
+      await wait(3000)
+    }
+  })()
 }
 
 // ***** Command line argument passing
