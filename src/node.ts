@@ -11,14 +11,6 @@ import repl from 'node:repl'
 import fs from 'node:fs'
 
 
-// interface Doc {
-//   cg: causalGraph.CausalGraph,
-//   version: LV[],
-//   // participants: null,
-//   // type: string,
-//   data: Primitive,
-// }
-
 type InboxEntry = {
   v: RawVersion[],
   // type: string,
@@ -26,20 +18,31 @@ type InboxEntry = {
 
 let inboxAgent = createAgent()
 
-
-
-let inbox = ss.create<InboxEntry>()
+const inbox = ss.create<InboxEntry>()
 const docs = new Map<LV, {
   agent: AgentGenerator,
   doc: dt.FancyDB
 }>()
 
+type FileData = {
+  inbox: ss.RemoteStateDelta,
+  docs: [LV, dt.SerializedFancyDBv1][]
+}
+
 let filename: string | null = null
 const loadFromFile = (f: string) => {
   try {
     const dataStr = fs.readFileSync(f, 'utf-8')
-    const data = JSON.parse(dataStr)
-    ss.mergeDelta(inbox, data)
+    const data = JSON.parse(dataStr) as FileData
+
+    ss.mergeDelta(inbox, data.inbox)
+    for (const [key, snap] of data.docs) {
+      docs.set(key, {
+        agent: createAgent(),
+        doc: dt.fromSerialized(snap)
+      })
+    }
+
     console.log('Loaded from', f)
   } catch (e: any) {
     if (e.code !== 'ENOENT') throw e
@@ -53,7 +56,10 @@ const loadFromFile = (f: string) => {
 const save = rateLimit(100, () => {
   if (filename != null) {
     console.log('Saving to', filename)
-    const data = ss.deltaSince(inbox, [])
+    const data: FileData = {
+      inbox: ss.deltaSince(inbox, []),
+      docs: Array.from(docs.entries()).map(([lv, {doc}]) => [lv, dt.serialize(doc)])
+    }
     const dataStr = JSON.stringify(data) + '\n'
     fs.writeFileSync(filename, dataStr)
   }
@@ -394,6 +400,14 @@ r.context.s = (docKey: LV, val: Primitive) => {
 
   console.log(`Set ${docKey} data`, val)
   indexDidChange()
+}
+
+r.context.get = (docKey: LV) => dt.get(docs.get(docKey)!.doc)
+
+r.context.print = () => {
+  for (const [k, doc] of docs.entries()) {
+    console.log(k, ':', dt.get(doc.doc))
+  }
 }
 
 r.once('exit', () => {
