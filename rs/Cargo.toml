@@ -1,0 +1,25 @@
+[package]
+name = "dt-p2p"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.21.2", features = ["full"] }
+bpaf = { version = "0.7.2", features = ["autocomplete", "derive"] }
+serde = { version = "1.0.147", features = ["derive"] }
+serde_json = "1.0.87"
+
+
+[features]
+default = ["dull-color"]
+bright-color = ["bpaf/bright-color"]
+dull-color = ["bpaf/dull-color"]
+
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+lto = true
+#debug = false
+#strip = true
