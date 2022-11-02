@@ -220,9 +220,9 @@ impl<T: Clone> StateSet<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteStateDelta<'a, T> {
     #[serde(borrow)]
-    cg: SmallVec<[PartialCGEntry<'a>; 4]>,
+    pub(crate) cg: SmallVec<[PartialCGEntry<'a>; 4]>,
     #[serde(borrow)]
-    ops: SmallVec<[(RemoteVersion<'a>, SmallVec<[RawPair<'a, T>; 2]>); 4]>
+    pub ops: SmallVec<[(RemoteVersion<'a>, SmallVec<[RawPair<'a, T>; 2]>); 4]>
 }
 
 impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {

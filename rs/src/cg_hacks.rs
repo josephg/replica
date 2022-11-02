@@ -20,6 +20,7 @@ pub(crate) fn serialize_cg_from_version<'a>(cg: &'a CausalGraph, v: &[LV], cur_v
 
     let mut entries = smallvec![];
     for r in ranges.1 {
+        // dbg!(r, &cg);
         for entry in cg.iter_range(r) {
             entries.push(PartialCGEntry {
                 agent: cg.get_agent_name(entry.span.agent).into(),
@@ -55,6 +56,16 @@ pub(crate) fn merge_partial_versions(cg: &mut CausalGraph, pe: &[PartialCGEntry]
     }
 
     (start .. cg.len()).into()
+}
+
+pub(crate) fn advance_frontier_from_serialized(cg: &CausalGraph, pe: &[PartialCGEntry], frontier: &mut Frontier) {
+    for e in pe {
+        if let Ok(last) = cg.try_remote_to_local_version(RemoteVersion(&e.agent, e.seq + e.len - 1)) {
+            frontier.0.push(last);
+        }
+    }
+
+    *frontier = cg.parents.find_dominators(frontier.as_ref());
 }
 
 #[cfg(test)]

@@ -7,18 +7,20 @@ mod cg_hacks;
 
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 use std::vec;
 use bpaf::{Bpaf, Parser, short};
 use diamond_types::causalgraph::summary::{VersionSummary, VersionSummaryFlat};
 use diamond_types::{AgentId, Frontier};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
-use tokio::{io, signal};
+use tokio::{io, select, signal};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use serde::{Serialize, Deserialize};
 use smartstring::alias::String as SmartString;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
+use crate::cg_hacks::advance_frontier_from_serialized;
 use crate::stateset::{RemoteStateDelta, StateSet};
 
 
@@ -70,6 +72,7 @@ async fn send_message<'a, W: AsyncWrite + Unpin>(stream: &mut W, msg: NetMessage
     stream.write_all(&msg).await
 }
 
+#[derive(Debug)]
 enum ProtocolState {
     Waiting,
     Established {
@@ -78,7 +81,20 @@ enum ProtocolState {
     }
 }
 
-async fn run_protocol(mut socket: TcpStream, database: DatabaseHandle) -> Result<(), io::Error> {
+impl ProtocolState {
+    fn get_established_mut(&mut self) -> (&mut Frontier, &mut Option<VersionSummaryFlat>) {
+        match self {
+            ProtocolState::Established { remote_frontier, unknown_versions } => {
+                (remote_frontier, unknown_versions)
+            }
+            _ => panic!("Unexpected state")
+        }
+    }
+}
+
+type IndexChannel = (broadcast::Sender<()>, broadcast::Receiver<()>);
+
+async fn run_protocol(mut socket: TcpStream, database: &mut DatabaseHandle, mut notify: IndexChannel) -> Result<(), io::Error> {
     let (reader, mut writer) = socket.split();
 
     // As we connect, both peers say hello by sending each other their version summaries.
@@ -91,39 +107,88 @@ async fn run_protocol(mut socket: TcpStream, database: DatabaseHandle) -> Result
 
     let reader = BufReader::new(reader);
     let mut line_reader = reader.lines();
-    while let Some(line) = line_reader.next_line().await? {
-        println!("Line {line}");
 
-        let msg: NetMessage = serde_json::from_str(&line)?;
-        match msg {
-            NetMessage::KnownIdx { vs } => {
-                dbg!(&vs);
+    loop {
+        select! {
+            line = line_reader.next_line() => {
+                if let Some(line) = line? {
+                    println!("Line {line}");
 
-                let db = database.read().await;
-                let (remote_frontier, remainder) = db.inbox.cg.intersect_with_flat_summary(&vs, &[]);
-                dbg!(&remote_frontier, &remainder);
+                    let msg: NetMessage = serde_json::from_str(&line)?;
+                    match msg {
+                        NetMessage::KnownIdx { vs } => {
+                            // dbg!(&vs);
 
-                if remote_frontier != db.inbox.version {
-                    println!("Sending delta...");
-                    let delta = db.inbox.delta_since(remote_frontier.as_ref());
-                    send_message(&mut writer, NetMessage::IdxDelta { delta }).await?;
+                            let db = database.read().await;
+                            let (remote_frontier, remainder) = db.inbox.cg.intersect_with_flat_summary(&vs, &[]);
+                            // dbg!(&remote_frontier, &remainder);
+
+                            if remote_frontier != db.inbox.version {
+                                println!("Sending delta...");
+                                let delta = db.inbox.delta_since(remote_frontier.as_ref());
+                                send_message(&mut writer, NetMessage::IdxDelta { delta }).await?;
+                            }
+
+                            state = ProtocolState::Established {
+                                remote_frontier,
+                                unknown_versions: remainder
+                            };
+                        }
+                        NetMessage::IdxDelta { delta } => {
+                            // dbg!(&delta);
+                            let mut db = database.write().await;
+
+                            let (remote_frontier, unknown_versions) = state.get_established_mut();
+                            advance_frontier_from_serialized(&db.inbox.cg, &delta.cg, remote_frontier);
+                            *unknown_versions = None;
+
+                            println!("remote frontier is {:?}", remote_frontier);
+
+                            let diff = db.inbox.merge_delta(delta);
+
+                            if !diff.is_empty() {
+                                // dbg!(diff);
+                                db.inbox.print_values();
+                                notify.0.send(()).unwrap();
+                            }
+
+                            // db.inbox.cg.
+
+                            // db.inbox.ge
+                        }
+                    }
+                } else {
+                    // End of network stream.
+                    println!("End of network stream");
+                    break;
+                }
+            }
+
+            recv_result = notify.1.recv() => {
+                if let Err(e) = recv_result {
+                    eprintln!("Message error {:?}", e);
+                    break;
                 }
 
-                state = ProtocolState::Established {
-                    remote_frontier,
-                    unknown_versions: remainder
-                };
-            }
-            NetMessage::IdxDelta { delta } => {
-                dbg!(&delta);
-                let mut db = database.write().await;
-                let diff = db.inbox.merge_delta(delta);
-                dbg!(diff);
-                db.inbox.print_values();
-                // db.inbox.ge
+                println!("Got broadcast message!");
+                if let ProtocolState::Established { remote_frontier, unknown_versions } = &mut state {
+                    let db = database.read().await;
+                    if let Some(uv) = unknown_versions.as_mut() {
+                        (*remote_frontier, *unknown_versions) = db.inbox.cg.intersect_with_flat_summary(uv, remote_frontier.as_ref());
+                        println!("Trimmed unknown versions to {:?}", unknown_versions);
+                        // dbg!((&remote_frontier, &unknown_versions));
+                    }
+
+                    if remote_frontier != &db.inbox.version {
+                        println!("Send delta!");
+                        let delta = db.inbox.delta_since(remote_frontier.as_ref());
+                        send_message(&mut writer, NetMessage::IdxDelta { delta }).await?;
+                    }
+                }
             }
         }
     }
+
 
     Ok(())
 }
@@ -140,8 +205,12 @@ async fn main() {
     let opts: CmdOpts = cmd_opts().run();
     dbg!(&opts);
 
+    let (tx, rx1) = tokio::sync::broadcast::channel(16);
+    drop(rx1);
+
     for port in opts.listen_ports.iter().copied() {
         let handle = database.clone();
+        let tx = tx.clone();
         tokio::spawn(async move {
             let listener = TcpListener::bind(
                 (Ipv4Addr::new(0,0,0,0), port)
@@ -150,9 +219,11 @@ async fn main() {
             loop {
                 let (socket, addr) = listener.accept().await?;
                 println!("{} connected", addr);
-                let handle = handle.clone();
+                let mut handle = handle.clone();
+                let tx = tx.clone();
                 tokio::spawn(async move {
-                    run_protocol(socket, handle).await?;
+                    let (tx2, rx2) = (tx.clone(), tx.subscribe());
+                    run_protocol(socket, &mut handle, (tx2, rx2)).await?;
                     println!("{} disconnected", addr);
                     Ok::<(), io::Error>(())
                 });
@@ -164,23 +235,42 @@ async fn main() {
     }
 
     for addr in opts.connect.iter().cloned() {
-        let handle = database.clone();
+        let mut handle = database.clone();
+        let tx = tx.clone();
         tokio::spawn(async move {
+            // let handle = database.clone();
             // TODO: Add reconnection support.
+            let addr: Vec<_> = addr.collect();
 
-            // Walk through the socket addresses trying to connect
-            let mut socket = None;
-            for a in addr {
-                let s = TcpStream::connect(a).await?;
-                socket = Some(s);
-                break;
-            };
+            loop {
+                println!("Trying to connect to {:?} ...", addr);
+                // Walk through the socket addresses trying to connect
+                let mut socket = None;
+                for a in &addr {
+                    dbg!(a);
+                    let s = TcpStream::connect(a).await;
+                    match s {
+                        Ok(s) => {
+                            socket = Some(s);
+                            break;
+                        }
+                        Err(err) => {
+                            eprintln!("Could not connect to {}: {}", a, err);
+                        }
+                    }
 
-            if let Some(socket) = socket {
-                run_protocol(socket, handle).await?;
-                println!("Disconnected! :(");
-            } else {
-                eprintln!("Could not connect to requested peer");
+                };
+                println!("ok so far...");
+
+                if let Some(socket) = socket {
+                    let (tx2, rx2) = (tx.clone(), tx.subscribe());
+                    run_protocol(socket, &mut handle, (tx2, rx2)).await?;
+                    println!("Disconnected! :(");
+                } else {
+                    eprintln!("Could not connect to requested peer");
+                }
+
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
             Ok::<(), io::Error>(())
         });
