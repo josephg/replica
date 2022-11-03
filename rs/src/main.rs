@@ -5,6 +5,7 @@ extern crate core;
 mod stateset;
 mod cg_hacks;
 mod database;
+mod protocol;
 
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -26,186 +27,11 @@ use database::Database;
 use crate::cg_hacks::advance_frontier_from_serialized;
 use crate::stateset::{RemoteStateDelta, StateSet};
 use std::io::{stdout, Write};
+use std::ops::Deref;
+use crate::protocol::Protocol;
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum NetMessage<'a> {
-    KnownIdx { vs: VersionSummaryFlat },
-    IdxDelta {
-        #[serde(borrow)]
-        delta: Box<RemoteStateDelta<'a, usize>>
-    },
-}
-
-
-type DatabaseHandle = Arc<RwLock<Database>>;
-
-async fn send_message<'a, W: AsyncWrite + Unpin>(stream: &mut W, msg: NetMessage<'a>) -> Result<(), io::Error> {
-    let mut msg = serde_json::to_vec(&msg).unwrap();
-    msg.push(b'\n');
-    print!("WRITE {}", std::str::from_utf8(&msg).unwrap());
-    // stdout().write_all(&msg).unwrap();
-    stream.write_all(&msg).await
-}
-
-#[derive(Debug)]
-struct ConnectionState {
-    remote_frontier: Frontier,
-    unknown_versions: Option<VersionSummaryFlat>
-}
-
-type IndexChannel = (broadcast::Sender<()>, broadcast::Receiver<()>);
-
-/// Protocol stores & represents the state for a connection to another peer.
-struct Protocol<'a> {
-    // I could store the network socket here too, but it makes it much harder with the borrowck.
-    database: &'a mut DatabaseHandle,
-    notify: IndexChannel,
-    state: Option<ConnectionState>,
-
-    // stdout: StandardStream,
-    // color: Color,
-}
-
-impl<'a> Protocol<'a> {
-    // fn new(mut socket: &'a TcpStream, database: &'a mut DatabaseHandle, mut notify: IndexChannel) -> Self {
-    fn new(database: &'a mut DatabaseHandle, mut notify: IndexChannel) -> Self {
-        // let mut stdout = StandardStream::stdout(ColorChoice::Auto);
-
-        Self {
-            database,
-            notify,
-            state: None,
-            // stdout,
-            // color,
-        }
-    }
-
-    async fn handle_message(&mut self, msg: NetMessage<'_>, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
-        match msg {
-            NetMessage::KnownIdx { vs } => {
-                // dbg!(&vs);
-
-                let db = self.database.read().await;
-                let (mut remote_frontier, remainder) = db.inbox.cg.intersect_with_flat_summary(&vs, &[]);
-                println!("remote frontier {:?}", remote_frontier);
-
-                // dbg!(&remote_frontier, &remainder);
-
-                if remote_frontier != db.inbox.version {
-                    println!("Sending delta to {:?}", db.inbox.version);
-                    let delta = db.inbox.delta_since(remote_frontier.as_ref());
-                    send_message(writer, NetMessage::IdxDelta { delta: Box::new(delta) }).await?;
-                    remote_frontier = db.inbox.version.clone();
-                }
-
-                if let Some(r) = remainder.as_ref() {
-                    println!("Remainder {:?}", r);
-                }
-
-                self.state = Some(ConnectionState {
-                    remote_frontier,
-                    unknown_versions: remainder
-                });
-            }
-            NetMessage::IdxDelta { delta } => {
-                // dbg!(&delta);
-                let mut db = self.database.write().await;
-
-                let ops = delta.ops;
-                let cg_delta = delta.cg;
-                let diff = db.inbox.merge_delta(&cg_delta, ops);
-
-                let ConnectionState {unknown_versions, remote_frontier} = self.state.as_mut().unwrap();
-                println!("remote frontier is {:?}", remote_frontier);
-                advance_frontier_from_serialized(&db.inbox.cg, &cg_delta, remote_frontier);
-                println!("->mote frontier is {:?}", remote_frontier);
-                *unknown_versions = None;
-
-                if !diff.is_empty() {
-                    // dbg!(diff);
-                    db.inbox.print_values();
-                    self.notify.0.send(()).unwrap();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn on_database_updated<'b>(&mut self, writer: &mut WriteHalf<'b>) -> Result<(), io::Error> {
-        println!("Got broadcast message!");
-        if let Some(state) = self.state.as_mut() {
-            let db = self.database.read().await;
-            if let Some(uv) = state.unknown_versions.as_mut() {
-                // If the remote peer has some versions we don't know about, first check to see if
-                // it already knows about some of the versions we've updated locally. This prevents
-                // a bug where the peer oversends data.
-                let (f, v) = db.inbox.cg.intersect_with_flat_summary(uv, state.remote_frontier.as_ref());
-                // I could just handle this via destructuring, but it causes an intellij error.
-                state.remote_frontier = f;
-                state.unknown_versions = v;
-
-                println!("Trimmed unknown versions to {:?}", state.unknown_versions);
-            }
-
-            if state.remote_frontier != db.inbox.version {
-                println!("Send delta! {:?} -> {:?}", state.remote_frontier, db.inbox.version);
-                let delta = db.inbox.delta_since(state.remote_frontier.as_ref());
-                send_message(writer, NetMessage::IdxDelta { delta: Box::new(delta) }).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn run(&mut self, mut socket: TcpStream) -> Result<(), io::Error> {
-        let (reader, mut writer) = socket.split();
-
-        let reader = BufReader::new(reader);
-        let mut line_reader = reader.lines();
-
-        send_message(&mut writer, NetMessage::KnownIdx {
-            vs: self.database.read().await.inbox.cg.summarize_versions_flat()
-        }).await?;
-
-        loop {
-            select! {
-                line = line_reader.next_line() => {
-                    if let Some(line) = line? {
-                        println!("READ {line}");
-
-                        let msg: NetMessage = serde_json::from_str(&line)?;
-                        self.handle_message(msg, &mut writer).await?;
-                    } else {
-                        // End of network stream.
-                        println!("End of network stream");
-                        break;
-                    }
-                }
-
-                recv_result = self.notify.1.recv() => {
-                    if let Err(e) = recv_result {
-                        println!("Message error {:?}", e);
-                        break;
-                    }
-
-                    self.on_database_updated(&mut writer).await?;
-                }
-            }
-        }
-
-
-        Ok(())
-    }
-}
-
-async fn run_protocol(mut socket: TcpStream, database: &mut DatabaseHandle, mut notify: IndexChannel) -> Result<(), io::Error> {
-    Protocol::new(database, notify).run(socket).await
-}
-
-#[tokio::main(flavor= "current_thread")]
+// #[tokio::main(flavor= "current_thread")]
+#[tokio::main]
 async fn main() {
     let mut db = Database::new();
     db.insert_item(rand::thread_rng().next_u32() as usize);
@@ -246,7 +72,7 @@ async fn main() {
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let (tx2, rx2) = (tx.clone(), tx.subscribe());
-                    run_protocol(socket, &mut handle, (tx2, rx2)).await?;
+                    Protocol::start(socket, &mut handle, (tx2, rx2)).await?;
                     println!("{} disconnected", addr);
                     Ok::<(), io::Error>(())
                 });
@@ -288,7 +114,7 @@ async fn main() {
 
                 if let Some(socket) = socket {
                     let (tx2, rx2) = (tx.clone(), tx.subscribe());
-                    run_protocol(socket, &mut handle, (tx2, rx2)).await?;
+                    Protocol::start(socket, &mut handle, (tx2, rx2)).await?;
                     println!("Disconnected! :(");
                 } else {
                     eprintln!("Could not connect to requested peer");
