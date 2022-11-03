@@ -217,19 +217,22 @@ impl<T: Clone> StateSet<T> {
     }
 }
 
+type CGDelta<'a> = SmallVec<[PartialCGEntry<'a>; 4]>;
+type SSDelta<'a, T> = SmallVec<[(RemoteVersion<'a>, SmallVec<[RawPair<'a, T>; 2]>); 4]>;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteStateDelta<'a, T> {
     #[serde(borrow)]
-    pub(crate) cg: SmallVec<[PartialCGEntry<'a>; 4]>,
+    pub(crate) cg: CGDelta<'a>,
     #[serde(borrow)]
-    pub ops: SmallVec<[(RemoteVersion<'a>, SmallVec<[RawPair<'a, T>; 2]>); 4]>
+    pub ops: SSDelta<'a, T>
 }
 
 impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
-    pub fn merge_delta(&mut self, delta: RemoteStateDelta<T>) -> DTRange {
-        let updated = merge_partial_versions(&mut self.cg, &delta.cg, Some(&mut self.version));
+    pub fn merge_delta(&mut self, cg_delta: &CGDelta, ops: SSDelta<T>) -> DTRange {
+        let updated = merge_partial_versions(&mut self.cg, &cg_delta, Some(&mut self.version));
 
-        for (key, pairs) in delta.ops {
+        for (key, pairs) in ops {
             self.merge_set(key, pairs);
         }
 
