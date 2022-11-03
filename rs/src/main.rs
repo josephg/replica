@@ -20,7 +20,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{TcpListener, TcpStream};
 use serde::{Deserialize, Serialize};
 use smartstring::alias::String as SmartString;
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::sync::{broadcast, RwLock};
 use database::Database;
@@ -65,21 +64,21 @@ struct Protocol<'a> {
     notify: IndexChannel,
     state: Option<ConnectionState>,
 
-    stdout: StandardStream,
-    color: Color,
+    // stdout: StandardStream,
+    // color: Color,
 }
 
 impl<'a> Protocol<'a> {
     // fn new(mut socket: &'a TcpStream, database: &'a mut DatabaseHandle, mut notify: IndexChannel) -> Self {
-    fn new(database: &'a mut DatabaseHandle, mut notify: IndexChannel, color: Color) -> Self {
-        let mut stdout = StandardStream::stdout(ColorChoice::Auto);
+    fn new(database: &'a mut DatabaseHandle, mut notify: IndexChannel) -> Self {
+        // let mut stdout = StandardStream::stdout(ColorChoice::Auto);
 
         Self {
             database,
             notify,
             state: None,
-            stdout,
-            color,
+            // stdout,
+            // color,
         }
     }
 
@@ -89,21 +88,20 @@ impl<'a> Protocol<'a> {
                 // dbg!(&vs);
 
                 let db = self.database.read().await;
-                self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
                 let (mut remote_frontier, remainder) = db.inbox.cg.intersect_with_flat_summary(&vs, &[]);
-                writeln!(&mut self.stdout, "remote frontier {:?}", remote_frontier);
+                println!("remote frontier {:?}", remote_frontier);
 
                 // dbg!(&remote_frontier, &remainder);
 
                 if remote_frontier != db.inbox.version {
-                    writeln!(&mut self.stdout, "Sending delta to {:?}", db.inbox.version);
+                    println!("Sending delta to {:?}", db.inbox.version);
                     let delta = db.inbox.delta_since(remote_frontier.as_ref());
                     send_message(writer, NetMessage::IdxDelta { delta: Box::new(delta) }).await?;
                     remote_frontier = db.inbox.version.clone();
                 }
 
                 if let Some(r) = remainder.as_ref() {
-                    writeln!(&mut self.stdout, "Remainder {:?}", r);
+                    println!("Remainder {:?}", r);
                 }
 
                 self.state = Some(ConnectionState {
@@ -114,16 +112,15 @@ impl<'a> Protocol<'a> {
             NetMessage::IdxDelta { delta } => {
                 // dbg!(&delta);
                 let mut db = self.database.write().await;
-                self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
 
                 let ops = delta.ops;
                 let cg_delta = delta.cg;
                 let diff = db.inbox.merge_delta(&cg_delta, ops);
 
                 let ConnectionState {unknown_versions, remote_frontier} = self.state.as_mut().unwrap();
-                writeln!(&mut self.stdout, "remote frontier is {:?}", remote_frontier);
+                println!("remote frontier is {:?}", remote_frontier);
                 advance_frontier_from_serialized(&db.inbox.cg, &cg_delta, remote_frontier);
-                writeln!(&mut self.stdout, "->mote frontier is {:?}", remote_frontier);
+                println!("->mote frontier is {:?}", remote_frontier);
                 *unknown_versions = None;
 
                 if !diff.is_empty() {
@@ -138,10 +135,9 @@ impl<'a> Protocol<'a> {
     }
 
     async fn on_database_updated<'b>(&mut self, writer: &mut WriteHalf<'b>) -> Result<(), io::Error> {
-        writeln!(&mut self.stdout, "Got broadcast message!");
+        println!("Got broadcast message!");
         if let Some(state) = self.state.as_mut() {
             let db = self.database.read().await;
-            self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
             if let Some(uv) = state.unknown_versions.as_mut() {
                 // If the remote peer has some versions we don't know about, first check to see if
                 // it already knows about some of the versions we've updated locally. This prevents
@@ -151,11 +147,11 @@ impl<'a> Protocol<'a> {
                 state.remote_frontier = f;
                 state.unknown_versions = v;
 
-                writeln!(&mut self.stdout, "Trimmed unknown versions to {:?}", state.unknown_versions);
+                println!("Trimmed unknown versions to {:?}", state.unknown_versions);
             }
 
             if state.remote_frontier != db.inbox.version {
-                writeln!(&mut self.stdout, "Send delta! {:?} -> {:?}", state.remote_frontier, db.inbox.version);
+                println!("Send delta! {:?} -> {:?}", state.remote_frontier, db.inbox.version);
                 let delta = db.inbox.delta_since(state.remote_frontier.as_ref());
                 send_message(writer, NetMessage::IdxDelta { delta: Box::new(delta) }).await?;
             }
@@ -170,7 +166,6 @@ impl<'a> Protocol<'a> {
         let reader = BufReader::new(reader);
         let mut line_reader = reader.lines();
 
-        self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
         send_message(&mut writer, NetMessage::KnownIdx {
             vs: self.database.read().await.inbox.cg.summarize_versions_flat()
         }).await?;
@@ -179,23 +174,20 @@ impl<'a> Protocol<'a> {
             select! {
                 line = line_reader.next_line() => {
                     if let Some(line) = line? {
-                        self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
-                        writeln!(&mut self.stdout, "READ {line}");
+                        println!("READ {line}");
 
                         let msg: NetMessage = serde_json::from_str(&line)?;
                         self.handle_message(msg, &mut writer).await?;
                     } else {
                         // End of network stream.
-                        self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
-                        writeln!(&mut self.stdout, "End of network stream");
+                        println!("End of network stream");
                         break;
                     }
                 }
 
                 recv_result = self.notify.1.recv() => {
                     if let Err(e) = recv_result {
-                        self.stdout.set_color(ColorSpec::new().set_fg(Some(self.color)));
-                        writeln!(&mut self.stdout, "Message error {:?}", e);
+                        println!("Message error {:?}", e);
                         break;
                     }
 
@@ -209,8 +201,8 @@ impl<'a> Protocol<'a> {
     }
 }
 
-async fn run_protocol(mut socket: TcpStream, database: &mut DatabaseHandle, mut notify: IndexChannel, color: Color) -> Result<(), io::Error> {
-    Protocol::new(database, notify, color).run(socket).await
+async fn run_protocol(mut socket: TcpStream, database: &mut DatabaseHandle, mut notify: IndexChannel) -> Result<(), io::Error> {
+    Protocol::new(database, notify).run(socket).await
 }
 
 #[tokio::main(flavor= "current_thread")]
@@ -222,18 +214,18 @@ async fn main() {
     let opts: CmdOpts = cmd_opts().run();
     dbg!(&opts);
 
-    let colors: Vec<Color> = vec![
-        Color::Green,
-        Color::Cyan,
-        Color::Yellow,
-        Color::Magenta,
-    ];
-    let mut i = 0;
-    let mut next_color = move || {
-        i += 1;
-        println!("COLOR {i}");
-        colors[i % colors.len()]
-    };
+    // let colors: Vec<Color> = vec![
+    //     Color::Green,
+    //     Color::Cyan,
+    //     Color::Yellow,
+    //     Color::Magenta,
+    // ];
+    // let mut i = 0;
+    // let mut next_color = move || {
+    //     i += 1;
+    //     println!("COLOR {i}");
+    //     colors[i % colors.len()]
+    // };
 
     let (tx, rx1) = tokio::sync::broadcast::channel(16);
     drop(rx1);
@@ -241,7 +233,7 @@ async fn main() {
     for port in opts.listen_ports.iter().copied() {
         let handle = database.clone();
         let tx = tx.clone();
-        let color = next_color();
+        // let color = next_color();
         tokio::spawn(async move {
             let listener = TcpListener::bind(
                 (Ipv4Addr::new(0,0,0,0), port)
@@ -254,7 +246,7 @@ async fn main() {
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let (tx2, rx2) = (tx.clone(), tx.subscribe());
-                    run_protocol(socket, &mut handle, (tx2, rx2), color).await?;
+                    run_protocol(socket, &mut handle, (tx2, rx2)).await?;
                     println!("{} disconnected", addr);
                     Ok::<(), io::Error>(())
                 });
@@ -268,7 +260,7 @@ async fn main() {
     for addr in opts.connect.iter().cloned() {
         let mut handle = database.clone();
         let tx = tx.clone();
-        let color = next_color();
+        // let color = next_color();
         tokio::spawn(async move {
             // let handle = database.clone();
             // TODO: Add reconnection support.
@@ -296,7 +288,7 @@ async fn main() {
 
                 if let Some(socket) = socket {
                     let (tx2, rx2) = (tx.clone(), tx.subscribe());
-                    run_protocol(socket, &mut handle, (tx2, rx2), color).await?;
+                    run_protocol(socket, &mut handle, (tx2, rx2)).await?;
                     println!("Disconnected! :(");
                 } else {
                     eprintln!("Could not connect to requested peer");
