@@ -68,7 +68,7 @@ impl<'a> Protocol<'a> {
     async fn send_delta<D: Deref<Target=Database>>(frontier: &mut Frontier, db: D, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
         let delta = db.inbox.delta_since(frontier.as_ref());
         send_message(writer, NetMessage::IdxDelta { delta: Box::new(delta) }).await?;
-        frontier.replace(db.inbox.version.as_ref());
+        frontier.replace(db.inbox.cg.version.as_ref());
         Ok(())
     }
 
@@ -83,8 +83,8 @@ impl<'a> Protocol<'a> {
 
                 // dbg!(&remote_frontier, &remainder);
 
-                if remote_frontier != db.inbox.version {
-                    println!("Sending delta to {:?}", db.inbox.version);
+                if remote_frontier != db.inbox.cg.version {
+                    println!("Sending delta to {:?}", db.inbox.cg.version);
                     Self::send_delta(&mut remote_frontier, db, writer).await?;
                 }
 
@@ -146,8 +146,8 @@ impl<'a> Protocol<'a> {
                 println!("Trimmed unknown versions to {:?}", state.unknown_versions);
             }
 
-            if state.remote_frontier != db.inbox.version {
-                println!("Send delta! {:?} -> {:?}", state.remote_frontier, db.inbox.version);
+            if state.remote_frontier != db.inbox.cg.version {
+                println!("Send delta! {:?} -> {:?}", state.remote_frontier, db.inbox.cg.version);
                 Self::send_delta(&mut state.remote_frontier, db, writer).await?;
             }
         }
@@ -162,7 +162,7 @@ impl<'a> Protocol<'a> {
         let mut line_reader = reader.lines();
 
         send_message(&mut writer, NetMessage::KnownIdx {
-            vs: self.database.read().await.inbox.cg.summarize_versions_flat()
+            vs: self.database.read().await.inbox.cg.agent_assignment.summarize_versions_flat()
         }).await?;
 
         loop {

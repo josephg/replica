@@ -3,7 +3,7 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use diamond_types::{AgentId, CausalGraph, DTRange, Frontier, LV};
-use diamond_types::causalgraph::remote_ids::RemoteVersion;
+use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use smallvec::{SmallVec, smallvec};
@@ -31,7 +31,7 @@ pub(crate) struct StateSet<T: Clone> {
     // Internal from version -> value at that version
     pub(crate) index: BTreeMap<LV, DocName>,
 
-    pub(crate) version: Frontier,
+    // pub(crate) version: Frontier,
     pub(crate) cg: CausalGraph,
 }
 
@@ -40,7 +40,7 @@ impl<T: Clone> StateSet<T> {
         Self {
             values: Default::default(),
             index: Default::default(),
-            version: Default::default(),
+            // version: Default::default(),
             cg: Default::default()
         }
     }
@@ -52,8 +52,7 @@ impl<T: Clone> StateSet<T> {
     }
 
     pub fn local_set(&mut self, agent_id: AgentId, key: Option<LV>, value: T) -> LV {
-        let v = self.cg.assign_local_op(self.version.as_ref(), agent_id, 1).start;
-        self.version.replace_with_1(v);
+        let v = self.cg.assign_local_op(agent_id, 1).start;
 
         let key = key.unwrap_or(v);
         let old_pairs = self.values.insert(key, smallvec![(v, value)]);
@@ -81,7 +80,7 @@ impl<T: Clone> StateSet<T> {
 
     // Could take &self here but we need to separate cg for the borrowck.
     fn raw_to_v(cg: &CausalGraph, rv: RemoteVersion) -> LV {
-        cg.remote_to_local_version(rv)
+        cg.agent_assignment.remote_to_local_version(rv)
     }
 
     // fn add_index(&mut self, v: Time, key: DocName) {
@@ -101,7 +100,7 @@ impl<T: Clone> StateSet<T> {
             Entry::Vacant(e) => {
                 // Just insert the received value.
                 e.insert(given_raw_pairs.into_iter().map(|(rv, val)| {
-                    let lv = self.cg.remote_to_local_version(rv);
+                    let lv = self.cg.agent_assignment.remote_to_local_version(rv);
                     self.index.insert(lv, key);
                     (lv, val)
                 }).collect());
@@ -112,9 +111,9 @@ impl<T: Clone> StateSet<T> {
                 let val = e.get_mut();
                 if val.len() == 1 && given_raw_pairs.len() == 1 {
                     let old_lv = val[0].0;
-                    let new_lv = self.cg.remote_to_local_version(given_raw_pairs[0].0);
+                    let new_lv = self.cg.agent_assignment.remote_to_local_version(given_raw_pairs[0].0);
 
-                    if let Some(ord) = self.cg.parents.version_cmp(new_lv, old_lv) {
+                    if let Some(ord) = self.cg.graph.version_cmp(new_lv, old_lv) {
                         if ord == Ordering::Greater {
                             // Replace it.
                             let pair = given_raw_pairs.remove(0); // This is weird.
@@ -134,7 +133,7 @@ impl<T: Clone> StateSet<T> {
                 // TODO: Using an arena allocator for all this junk would be better.
                 let old_versions: SmallVec<[LV; 2]> = val.iter().map(|(v, _)| *v).collect();
                 let new_versions: SmallVec<[LV; 2]> = given_raw_pairs.iter().map(|(rv, _)| (
-                    self.cg.remote_to_local_version(*rv)
+                    self.cg.agent_assignment.remote_to_local_version(*rv)
                 )).collect();
 
                 // TODO: Might also be better to just clone() the items in here instead of copying
@@ -146,7 +145,7 @@ impl<T: Clone> StateSet<T> {
                 let mut idx_changes: SmallVec<[(LV, bool); 2]> = smallvec![];
 
                 // dbg!(old_versions.iter().copied().chain(new_versions.iter().copied()).collect::<Vec<_>>());
-                self.cg.parents.find_dominators_full(
+                self.cg.graph.find_dominators_full(
                     old_versions.iter().copied().chain(new_versions.iter().copied()),
                     |v, dominates| {
                         // There's 3 cases here:
@@ -194,7 +193,7 @@ impl<T: Clone> StateSet<T> {
             if pairs.len() >= 2 {
                 let version: SmallVec<[LV; 2]> = pairs.iter().map(|(v, _)| *v).collect();
 
-                let dominators = self.cg.parents.find_dominators(&version);
+                let dominators = self.cg.graph.find_dominators(&version);
                 assert_eq!(version.as_slice(), dominators.as_ref());
             }
 
@@ -206,7 +205,7 @@ impl<T: Clone> StateSet<T> {
             }
         }
 
-        assert_eq!(self.version, self.cg.dbg_get_frontier_inefficiently());
+        self.cg.dbg_check(false);
 
         assert_eq!(expected_idx_size, self.index.len());
     }
@@ -230,7 +229,7 @@ pub struct RemoteStateDelta<'a, T> {
 
 impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
     pub fn merge_delta(&mut self, cg_delta: &CGDelta, ops: SSDelta<T>) -> DTRange {
-        let updated = merge_partial_versions(&mut self.cg, &cg_delta, Some(&mut self.version));
+        let updated = merge_partial_versions(&mut self.cg, &cg_delta);
 
         for (key, pairs) in ops {
             self.merge_set(key, pairs);
@@ -240,10 +239,10 @@ impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
     }
 
     pub fn delta_since(&self, v: &[LV]) -> RemoteStateDelta<T> {
-        let cg_delta = serialize_cg_from_version(&self.cg, v, self.version.as_ref());
+        let cg_delta = serialize_cg_from_version(&self.cg, v, self.cg.version.as_ref());
 
         // dbg!(&self.version);
-        let ranges = self.cg.parents.diff(v, self.version.as_ref());
+        let ranges = self.cg.graph.diff(v, self.cg.version.as_ref());
         assert!(ranges.0.is_empty());
         let ranges = ranges.1;
 
@@ -268,8 +267,8 @@ impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
             ops: docs
                 .into_iter()
                 .map(|(name, pairs)| (
-                    self.cg.local_to_remote_version(name),
-                    pairs.into_iter().map(|(v, value)| (self.cg.local_to_remote_version(v), value))
+                    self.cg.agent_assignment.local_to_remote_version(name),
+                    pairs.into_iter().map(|(v, value)| (self.cg.agent_assignment.local_to_remote_version(v), value))
                         .collect()
                 ))
                 .collect()
