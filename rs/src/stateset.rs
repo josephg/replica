@@ -229,7 +229,7 @@ pub struct RemoteStateDelta<'a, T> {
 
 impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
     pub fn merge_delta(&mut self, cg_delta: &CGDelta, ops: SSDelta<T>) -> DTRange {
-        let updated = merge_partial_versions(&mut self.cg, &cg_delta);
+        let updated = merge_partial_versions(&mut self.cg, cg_delta);
 
         for (key, pairs) in ops {
             self.merge_set(key, pairs);
@@ -278,7 +278,7 @@ impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
 
 #[cfg(test)]
 mod tests {
-    use diamond_types::causalgraph::remote_ids::RemoteVersion;
+    use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
     use diamond_types::Frontier;
     use smallvec::smallvec;
     use crate::stateset::StateSet;
@@ -300,8 +300,8 @@ mod tests {
         let mike = ss.cg.get_or_create_agent_id("mike");
         ss.dbg_check();
 
-        ss.cg.assign_local_op(&[], seph, 1).last();
-        ss.version = Frontier::from_sorted(&[0]);
+        ss.cg.assign_local_op_with_parents(&[], seph, 1).last();
+        ss.cg.version = Frontier::from_sorted(&[0]);
         ss.merge_set(RemoteVersion("seph", 0), smallvec![(("seph", 0).into(), "hi".into())]);
         ss.dbg_check();
         assert!(ss.get_values_ref(0).unwrap().eq((&["hi"]).iter()));
@@ -312,15 +312,15 @@ mod tests {
         assert!(ss.get_values_ref(0).unwrap().eq((&["hi"]).iter()));
 
         // Now we'll supercede it
-        let a = ss.cg.assign_local_op(&[0], seph, 1).last();
-        ss.version = Frontier::from_sorted(&[a]);
+        let a = ss.cg.assign_local_op_with_parents(&[0], seph, 1).last();
+        ss.cg.version = Frontier::from_sorted(&[a]);
         ss.merge_set(RemoteVersion("seph", 0), smallvec![(("seph", 1).into(), "yo".into())]);
         ss.dbg_check();
         assert!(ss.get_values_ref(0).unwrap().eq((&["yo"]).iter()));
 
         // And insert something concurrent...
-        let b = ss.cg.assign_local_op(&[], mike, 1).last();
-        ss.version = Frontier::from_sorted(&[a, b]);
+        let b = ss.cg.assign_local_op_with_parents(&[], mike, 1).last();
+        ss.cg.version = Frontier::from_sorted(&[a, b]);
         ss.merge_set(RemoteVersion("seph", 0), smallvec![(("mike", 0).into(), "xxx".into())]);
         ss.dbg_check();
         assert!(ss.get_values_ref(0).unwrap().eq((&["yo", "xxx"]).iter()));
@@ -328,8 +328,8 @@ mod tests {
         // dbg!(&ss);
         // And collapse the concurrent editing state
         // println!("\n\n------");
-        let c = ss.cg.assign_local_op(&[a, b], seph, 1).last();
-        ss.version = Frontier::from_sorted(&[c]);
+        let c = ss.cg.assign_local_op_with_parents(&[a, b], seph, 1).last();
+        ss.cg.version = Frontier::from_sorted(&[c]);
         ss.merge_set(RemoteVersion("seph", 0), smallvec![(("seph", 2).into(), "m".into())]);
         ss.dbg_check();
         // dbg!(ss.get_values_ref(0).unwrap().collect::<Vec<_>>());

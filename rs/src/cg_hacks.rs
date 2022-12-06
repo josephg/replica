@@ -71,7 +71,7 @@ mod tests {
     fn foo() {
         let mut cg = CausalGraph::new();
         cg.get_or_create_agent_id("seph");
-        cg.assign_local_op(&[], 0, 10);
+        cg.assign_local_op_with_parents(&[], 0, 10);
         let s = serialize_cg_from_version(&cg, &[5], &[9]);
         dbg!(serde_json::to_string(&s));
     }
