@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use diamond_types::{AgentId, CausalGraph, DTRange, Frontier, LV};
 use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
+use diamond_types::experiments::ExperimentalOpLog;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use smallvec::{SmallVec, smallvec};
 use smartstring::alias::String as SmartString;
 use crate::cg_hacks::{merge_partial_versions, PartialCGEntry, serialize_cg_from_version};
 
-type DocName = LV;
+pub type DocName = LV;
 
 type Pair<T> = (LV, T);
 // type RawPair<T> = (RemoteId, T);
@@ -72,9 +73,18 @@ impl<T: Clone> StateSet<T> {
         self.local_set(agent_id, None, value)
     }
 
-    pub fn modified_keys_since(&self, since_v: LV) -> impl Iterator<Item=DocName> + '_ {
+    pub fn modified_keys_since_v(&self, since_v: LV) -> impl Iterator<Item=DocName> + '_ {
         self.index.range(since_v..).map(|(_v, &key)| {
             key
+        })
+    }
+
+    pub fn modified_keys_since_frontier(&self, since: &[LV]) -> impl Iterator<Item=DocName> + '_ {
+        let diff = self.cg.graph.diff(since, self.cg.version.as_ref()).1;
+        diff.into_iter().flat_map(|range| {
+            self.index.range(range).map(|(_v, &key)| {
+                key
+            })
         })
     }
 

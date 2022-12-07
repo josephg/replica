@@ -13,7 +13,7 @@ use std::time::Duration;
 use std::vec;
 use bpaf::{Bpaf, Parser, short};
 use diamond_types::causalgraph::summary::{VersionSummary, VersionSummaryFlat};
-use diamond_types::{AgentId, Frontier};
+use diamond_types::{AgentId, CreateValue, Frontier, Primitive, ROOT_CRDT_ID};
 use rand::distributions::Alphanumeric;
 use rand::{Rng, RngCore};
 use tokio::{io, select, signal};
@@ -34,7 +34,11 @@ use crate::protocol::Protocol;
 #[tokio::main]
 async fn main() {
     let mut db = Database::new();
-    db.insert_item(rand::thread_rng().next_u32() as usize);
+
+    let name = db.create_item();
+    let (doc, agent) = db.get_doc_mut(name).unwrap();
+    doc.local_map_set(agent, ROOT_CRDT_ID, "yo", CreateValue::Primitive(Primitive::I64(rand::thread_rng().next_u32() as i64)));
+
     let database = Arc::new(RwLock::new(db));
 
     let opts: CmdOpts = cmd_opts().run();

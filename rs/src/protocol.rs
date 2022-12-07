@@ -1,17 +1,21 @@
-use diamond_types::Frontier;
-use diamond_types::causalgraph::summary::VersionSummaryFlat;
+use std::collections::{BTreeMap, BTreeSet};
+use diamond_types::{Frontier, LV};
+use diamond_types::causalgraph::summary::{VersionSummary, VersionSummaryFlat};
 use tokio::net::TcpStream;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
+use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
+use diamond_types::experiments::SerializedChanges;
 use tokio::net::tcp::WriteHalf;
 use tokio::select;
 use crate::cg_hacks::advance_frontier_from_serialized;
-use crate::database::Database;
-use crate::stateset::RemoteStateDelta;
+use crate::database::{Database, InboxEntry};
+use crate::stateset::{DocName, RemoteStateDelta};
 use serde::{Serialize, Deserialize};
+use smallvec::{SmallVec, smallvec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -19,8 +23,19 @@ enum NetMessage<'a> {
     KnownIdx { vs: VersionSummaryFlat },
     IdxDelta {
         #[serde(borrow)]
-        delta: Box<RemoteStateDelta<'a, usize>>
+        idx_delta: Box<RemoteStateDelta<'a, InboxEntry>>,
+        #[serde(borrow)]
+        sub_deltas: SmallVec<[(RemoteVersion<'a>, SerializedChanges<'a>); 2]>,
     },
+    SubscribeDocs {
+        // Not sure if we should fetch, or fetch and subscribe or what here.
+        #[serde(borrow)]
+        docs: SmallVec<[(RemoteVersion<'a>, VersionSummary); 2]>,
+    },
+    DocsDelta {
+        #[serde(borrow)]
+        deltas: SmallVec<[(RemoteVersion<'a>, SerializedChanges<'a>); 2]>,
+    }
 }
 
 type DatabaseHandle = Arc<RwLock<Database>>;
@@ -36,7 +51,10 @@ async fn send_message<'a, W: AsyncWrite + Unpin>(stream: &mut W, msg: NetMessage
 #[derive(Debug)]
 struct ConnectionState {
     remote_frontier: Frontier,
-    unknown_versions: Option<VersionSummaryFlat>
+    unknown_versions: Option<VersionSummaryFlat>,
+
+    my_subscriptions: BTreeSet<DocName>,
+    remote_subscriptions: BTreeMap<DocName, Frontier>, // Storing the last known version on the remote peer.
 }
 
 type IndexChannel = (broadcast::Sender<usize>, broadcast::Receiver<usize>);
@@ -65,12 +83,48 @@ impl<'a> Protocol<'a> {
         }
     }
 
-    async fn send_delta<D: Deref<Target=Database>>(frontier: &mut Frontier, db: D, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
-        let delta = db.inbox.delta_since(frontier.as_ref());
-        send_message(writer, NetMessage::IdxDelta { delta: Box::new(delta) }).await?;
-        frontier.replace(db.inbox.cg.version.as_ref());
+    async fn send_delta<D: Deref<Target=Database>>(since_frontier: &mut Frontier, db: D, subs: Option<&mut BTreeMap<DocName, Frontier>>, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
+        let idx_delta = db.inbox.delta_since(since_frontier.as_ref());
+
+        let mut sub_deltas = smallvec![];
+        if let Some(subs) = subs {
+            for key in db.inbox.modified_keys_since_frontier(since_frontier.as_ref()) {
+                if let Some(known_frontier) = subs.get_mut(&key) {
+                    // We might not have any new operations for the doc yet, or even know about it.
+                    let Some(doc) = db.docs.get(&key) else { continue; };
+
+                    if known_frontier.as_ref() != doc.cg.version.as_ref() {
+                        let remote_name = db.inbox.cg.agent_assignment.local_to_remote_version(key);
+                        let changes = doc.changes_since(known_frontier.as_ref());
+                        sub_deltas.push((remote_name, changes));
+                    }
+                }
+            }
+        }
+
+        send_message(writer, NetMessage::IdxDelta { idx_delta: Box::new(idx_delta), sub_deltas }).await?;
+        since_frontier.replace(db.inbox.cg.version.as_ref());
         Ok(())
     }
+
+    fn apply_doc_updates<'b, D: DerefMut<Target=Database>, I: Iterator<Item = (RemoteVersion<'b>, SerializedChanges<'b>)>>(db: &mut D, deltas_iter: I) {
+        for (remote_name, changes) in deltas_iter {
+            let local_name = db.inbox.cg.agent_assignment.remote_to_local_version(remote_name);
+
+            let doc = db.docs.entry(local_name).or_default();
+            doc.merge_ops(changes);
+
+            println!("doc {} -> version {:?}, data: {:?}", local_name, doc.cg.version, doc.checkout());
+        }
+
+        for (local_name, doc) in db.docs.iter() {
+            println!("doc {} -> version {:?}, data: {:?}", local_name, doc.cg.version, doc.checkout());
+        }
+    }
+
+    // fn get_doc_updates_since<D: Deref<Target=Database>>(db: D, v: &[LV]) -> SmallVec<[(RemoteVersion<'a>, SerializedChanges<'a>); 2]> {
+    //
+    // }
 
     async fn handle_message(&mut self, msg: NetMessage<'_>, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
         match msg {
@@ -85,7 +139,7 @@ impl<'a> Protocol<'a> {
 
                 if remote_frontier != db.inbox.cg.version {
                     println!("Sending delta to {:?}", db.inbox.cg.version);
-                    Self::send_delta(&mut remote_frontier, db, writer).await?;
+                    Self::send_delta(&mut remote_frontier, db, None, writer).await?;
                 }
 
                 if let Some(r) = remainder.as_ref() {
@@ -94,10 +148,12 @@ impl<'a> Protocol<'a> {
 
                 self.state = Some(ConnectionState {
                     remote_frontier,
-                    unknown_versions: remainder
+                    unknown_versions: remainder,
+                    my_subscriptions: Default::default(),
+                    remote_subscriptions: Default::default(),
                 });
             }
-            NetMessage::IdxDelta { delta } => {
+            NetMessage::IdxDelta { idx_delta: delta, sub_deltas } => {
                 // dbg!(&delta);
                 let mut db = self.database.write().await;
 
@@ -105,18 +161,85 @@ impl<'a> Protocol<'a> {
                 let cg_delta = delta.cg;
                 let diff = db.inbox.merge_delta(&cg_delta, ops);
 
-                let ConnectionState {unknown_versions, remote_frontier} = self.state.as_mut().unwrap();
-                println!("remote frontier is {:?}", remote_frontier);
-                advance_frontier_from_serialized(&db.inbox.cg, &cg_delta, remote_frontier);
-                println!("->mote frontier is {:?}", remote_frontier);
-                *unknown_versions = None;
+                let state = self.state.as_mut().unwrap();
+
+                println!("remote frontier is {:?}", state.remote_frontier);
+                advance_frontier_from_serialized(&mut state.remote_frontier, &cg_delta, &db.inbox.cg);
+                println!("->mote frontier is {:?}", state.remote_frontier);
+                state.unknown_versions = None;
 
                 if !diff.is_empty() {
+                    let mut sub = smallvec![];
+                    for key in db.inbox.modified_keys_since_v(diff.start) {
+                        if !state.my_subscriptions.contains(&key) {
+                            // Usually just one key.
+                            let remote_name = db.inbox.cg.agent_assignment.local_to_remote_version(key);
+                            // I'm going to take for granted that the version has changed, and we care about it.
+                            let local_vs = db.docs.get(&key)
+                                .map(|doc| {
+                                    doc.cg.agent_assignment.summarize_versions()
+                                })
+                                .unwrap_or_default();
+
+                            println!("Subscribing to {} ({:?})", key, remote_name);
+                            sub.push((remote_name, local_vs));
+
+                            // We should probably only do this after the sub message has been sent below?
+                            // Though if an error happens we'll bail anyway, so its fine for now ...
+                            state.my_subscriptions.insert(key);
+                        }
+                    }
+
+                    if !sub.is_empty() {
+                        send_message(writer, NetMessage::SubscribeDocs { docs: sub }).await?;
+                    } else {
+                        // I don't know why I need to do this, but its needed to make the borrowck happy.
+                        drop(sub);
+                    }
+
+                    Self::apply_doc_updates(&mut db, sub_deltas.into_iter());
+
                     // dbg!(diff);
                     db.inbox.print_values();
                     drop(db); // TODO: Check performance of doing this. Should make read handles cheaper?
                     self.notify.0.send(diff.end).unwrap();
+                } else {
+                    assert!(sub_deltas.is_empty());
                 }
+            }
+
+            NetMessage::SubscribeDocs { docs } => {
+                let mut db = self.database.read().await;
+                let state = self.state.as_mut().unwrap();
+
+                let mut deltas = smallvec![];
+                for (remote_name, vs) in docs {
+                    // We should always have this document at this point.
+                    // TODO: if we don't, error rather than panic.
+                    let local_name = db.inbox.cg.agent_assignment.remote_to_local_version(remote_name);
+
+                    println!("Remote peer subscribed to {} ({:?})", local_name, remote_name);
+
+                    // I'll ignore the known version summary for now. We could store that to avoid
+                    // re-sending operations later.
+                    let oplog = db.docs.get(&local_name).unwrap();
+                    let since_version = oplog.cg.intersect_with_summary(&vs, &[]).0;
+
+                    // I'll still include an empty set of changes even if the remote peer is up to date,
+                    // so they know the subscription is ready.
+                    let changes = oplog.changes_since(since_version.as_ref());
+
+                    state.remote_subscriptions.insert(local_name, since_version);
+
+                    deltas.push((remote_name, changes));
+                }
+
+                send_message(writer, NetMessage::DocsDelta { deltas }).await?;
+            }
+
+            NetMessage::DocsDelta { deltas } => {
+                let mut db = self.database.write().await;
+                Self::apply_doc_updates(&mut db, deltas.into_iter());
             }
         }
 
@@ -147,8 +270,11 @@ impl<'a> Protocol<'a> {
             }
 
             if state.remote_frontier != db.inbox.cg.version {
+                // TODO: Optimize this by calculating & serializing the delta once instead of
+                // once per peer.
+                let state = self.state.as_mut().unwrap();
                 println!("Send delta! {:?} -> {:?}", state.remote_frontier, db.inbox.cg.version);
-                Self::send_delta(&mut state.remote_frontier, db, writer).await?;
+                Self::send_delta(&mut state.remote_frontier, db, Some(&mut state.remote_subscriptions), writer).await?;
             }
         }
 

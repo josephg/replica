@@ -52,7 +52,7 @@ pub(crate) fn merge_partial_versions(cg: &mut CausalGraph, pe: &[PartialCGEntry]
     (start .. cg.len()).into()
 }
 
-pub(crate) fn advance_frontier_from_serialized(cg: &CausalGraph, pe: &[PartialCGEntry], frontier: &mut Frontier) {
+pub(crate) fn advance_frontier_from_serialized(frontier: &mut Frontier, pe: &[PartialCGEntry], cg: &CausalGraph) {
     for e in pe {
         if let Ok(last) = cg.agent_assignment.try_remote_to_local_version(RemoteVersion(&e.agent, e.seq + e.len - 1)) {
             frontier.0.push(last);
