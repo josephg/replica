@@ -1,0 +1,20 @@
+[package]
+name = "replica-swift"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["staticlib"]
+
+[build-dependencies]
+cbindgen = "0.24.3"
+
+[dependencies]
+#swift-bridge = { version = "0.1.41", features = ["async"] }
+swift-bridge = "0.1.41"
+#diamond-types = { path = "../..", features = ["serde", "wchar_conversion"] }
+#rand = { version = "0.8.5" }
+tokio = { version = "1.21.2", features = ["full"] }
+replica = { path = "../.." }

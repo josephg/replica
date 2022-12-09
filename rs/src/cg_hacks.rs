@@ -43,7 +43,7 @@ pub(crate) fn merge_partial_versions(cg: &mut CausalGraph, pe: &[PartialCGEntry]
             .collect::<Frontier>();
 
         let agent = cg.get_or_create_agent_id(&e.agent);
-        let v_span = cg.merge_and_assign(parents.as_ref(), AgentSpan {
+        let _v_span = cg.merge_and_assign(parents.as_ref(), AgentSpan {
             agent,
             seq_range: (e.seq .. e.seq + e.len).into()
         });
@@ -73,6 +73,6 @@ mod tests {
         cg.get_or_create_agent_id("seph");
         cg.assign_local_op_with_parents(&[], 0, 10);
         let s = serialize_cg_from_version(&cg, &[5], &[9]);
-        dbg!(serde_json::to_string(&s));
+        dbg!(serde_json::to_string(&s).unwrap());
     }
 }

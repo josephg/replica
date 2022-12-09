@@ -1,9 +1,19 @@
 [package]
-name = "dt-p2p"
-version = "0.1.0"
+name = "replica"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "replica"
+path = "src/main.rs"
+
+[workspace]
+members = ["crates/*"]
 
 [dependencies]
 tokio = { version = "1.21.2", features = ["full"] }

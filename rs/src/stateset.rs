@@ -2,13 +2,11 @@ use std::cmp::Ordering;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use diamond_types::{AgentId, CausalGraph, DTRange, Frontier, LV};
+use diamond_types::{AgentId, CausalGraph, DTRange, LV};
 use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
-use diamond_types::experiments::ExperimentalOpLog;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use smallvec::{SmallVec, smallvec};
-use smartstring::alias::String as SmartString;
 use crate::cg_hacks::{merge_partial_versions, PartialCGEntry, serialize_cg_from_version};
 
 pub type DocName = LV;
@@ -196,6 +194,7 @@ impl<T: Clone> StateSet<T> {
         }
     }
 
+    #[allow(unused)]
     pub fn dbg_check(&self) {
         let mut expected_idx_size = 0;
 
@@ -218,6 +217,29 @@ impl<T: Clone> StateSet<T> {
         self.cg.dbg_check(false);
 
         assert_eq!(expected_idx_size, self.index.len());
+    }
+
+    pub(crate) fn resolve_pairs<'a>(&'a self, pairs: &'a [Pair<T>]) -> &Pair<T> {
+        let len = pairs.len();
+
+        let mut iter = pairs.iter();
+        let first = iter.next().expect("Internal consistency violation - pairs list empty");
+
+        if len > 1 {
+            let av = self.cg.agent_assignment.local_to_agent_version(first.0);
+
+            let (_, result) = iter.fold((av, first), |(av, pair1), pair2| {
+                let av2 = self.cg.agent_assignment.local_to_agent_version(pair2.0);
+                if self.cg.agent_assignment.tie_break_agent_versions(av, av2) == Ordering::Greater {
+                    (av, pair1)
+                } else {
+                    (av2, pair2)
+                }
+            });
+            result
+        } else {
+            first
+        }
     }
 
     fn get_values_ref(&self, key: DocName) -> Option<impl Iterator<Item = &T>> {
