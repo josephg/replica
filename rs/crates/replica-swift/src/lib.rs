@@ -8,14 +8,17 @@ use replica::connect;
 use replica::database::Database;
 
 #[swift_bridge::bridge]
-mod ffi {}
+mod ffi {
+    extern "Rust" {
+        fn foo();
+    }
+}
+
+fn foo() {
+    println!("oh hai");
+}
 
 type CCallback = extern "C" fn(*mut c_void) -> ();
-
-#[no_mangle]
-pub extern "C" fn hello_world() {
-    println!("Hello World!");
-}
 
 #[no_mangle]
 pub extern "C" fn database_new() -> *mut DatabaseHandle { Box::into_raw(Box::new(DatabaseHandle::new())) }

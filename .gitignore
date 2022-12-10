@@ -2,3 +2,6 @@ node_modules
 dist
 rs/target
 .idea
+
+rs/crates/replica-swift/bridge
+.*.swp
