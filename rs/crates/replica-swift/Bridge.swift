@@ -23,8 +23,13 @@ public func db_start(db: OpaquePointer, signal_data: UnsafeMutableRawPointer?, s
 //    print("xxxx")
 //}
 
-public func db_num_posts(db: OpaquePointer) -> UInt64 {
-    database_num_posts(db)
+//public func db_num_posts(db: OpaquePointer) -> UInt64 {
+//    database_num_posts(db)
+//}
+
+//void *signal_data, void (*cb)(void*, uintptr_t len, const uintptr_t *names));
+public func db_get_posts(db: OpaquePointer, signal_data: UnsafeMutableRawPointer?, signal: (@convention(c) (UnsafeMutableRawPointer?, UInt, UnsafePointer<UInt>?) -> Void)) {
+    database_get_posts(db, signal_data, signal)
 }
 
 //
