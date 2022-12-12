@@ -19,3 +19,4 @@ swift-bridge = "0.1.41"
 #rand = { version = "0.8.5" }
 tokio = { version = "1.21.2", features = ["full"] }
 replica = { path = "../.." }
+diamond-types = { version = "1.0.0", path = "../../../../diamond-types", features = ["serde"] }

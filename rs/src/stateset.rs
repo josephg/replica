@@ -242,6 +242,7 @@ impl<T: Clone> StateSet<T> {
         }
     }
 
+    #[allow(unused)]
     fn get_values_ref(&self, key: DocName) -> Option<impl Iterator<Item = &T>> {
         self.values.get(&key)
             .map(|pairs| pairs.iter().map(|(_, val)| val))

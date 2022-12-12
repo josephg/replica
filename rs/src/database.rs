@@ -3,7 +3,7 @@ use smartstring::alias::String as SmartString;
 use rand::distributions::Alphanumeric;
 use diamond_types::{AgentId, CRDTKind, CreateValue, Frontier, LV, ROOT_CRDT_ID};
 use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersionOwned;
-use diamond_types::experiments::{ExperimentalOpLog, SerializedOps};
+use diamond_types::experiments::{ExperimentalBranch, ExperimentalOpLog, SerializedOps};
 use diamond_types::list::operation::TextOperation;
 use rand::Rng;
 use smallvec::SmallVec;
@@ -110,4 +110,8 @@ impl Database {
         Some(doc.checkout_text(content).to_string())
     }
 
+    pub fn checkout(&self, doc: DocName) -> Option<ExperimentalBranch> {
+        self.docs.get(&doc)
+            .map(|oplog| oplog.checkout_tip())
+    }
 }

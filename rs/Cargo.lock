@@ -494,6 +494,7 @@ name = "replica-swift"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
+ "diamond-types",
  "replica",
  "swift-bridge",
  "swift-bridge-build",

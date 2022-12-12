@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ptr::null;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use diamond_types::experiments::ExperimentalBranch;
+use diamond_types::LV;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use replica::connect;
@@ -14,12 +16,27 @@ use replica::database::Database;
 mod ffi {
     extern "Rust" {
         // type DatabaseHandle;
-    //     #[swift_bridge::bridge(swift_repr = "struct")]
-    //     struct TextOp {
-    //
-    //     }
-    //
+        //     #[swift_bridge::bridge(swift_repr = "struct")]
+        //     struct TextOp {
+        //
+        //     }
+        //
         fn foo() -> Vec<usize>;
+    }
+
+    extern "Rust" {
+        type Branch;
+
+        fn get_post_content(&self) -> String;
+    }
+}
+
+pub struct Branch(ExperimentalBranch);
+
+impl Branch {
+    fn get_post_content(&self) -> String {
+        let content_crdt = self.0.text_at_path(&["content"]);
+        self.0.texts.get(&content_crdt).unwrap().to_string()
     }
 }
 
@@ -80,15 +97,25 @@ pub extern "C" fn database_get_edits_since(this: *mut DatabaseConnection, doc_na
 }
 
 #[no_mangle]
-pub extern "C" fn database_get_post_content(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *const u8) -> ()) {
+pub extern "C" fn database_checkout(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *mut Branch) -> ()) {
     let this = unsafe { &mut *this };
-    let content = this.with_read_database(|db| {
-        db.post_content(doc_name)
-    });
+    let post = this.with_read_database(|db| {
+        db.checkout(doc_name)
+    }).unwrap();
 
-    let ptr = content.map(|s| s.as_ptr()).unwrap_or(null());
+    let ptr = Box::into_raw(Box::new(Branch(post)));
     cb(signal_data, ptr);
 }
+// #[no_mangle]
+// pub extern "C" fn database_get_post_content(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *const u8) -> ()) {
+//     let this = unsafe { &mut *this };
+//     let content = this.with_read_database(|db| {
+//         db.post_content(doc_name)
+//     });
+//
+//     let ptr = content.map(|s| s.as_ptr()).unwrap_or(null());
+//     cb(signal_data, ptr);
+// }
 
 #[no_mangle]
 pub extern "C" fn database_get_posts(this: *mut DatabaseConnection, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, len: usize, bytes: *const usize) -> ()) {
@@ -186,14 +213,20 @@ impl DatabaseConnection {
     //     self.with_read_database(|db| db.posts().count())
     // }
 
-    fn get_post_content(&self, idx: usize) -> Option<String> {
-        self.with_read_database(|db| {
-            let mut posts = db.posts();
-            let name = posts.nth(idx)?;
+    // fn checkout_post(&self, doc: LV) -> Option<ExperimentalBranch> {
+    //     self.with_read_database(|db| {
+    //         db.checkout(doc)
+    //     })
+    // }
 
-            Some(db.post_content(name)?)
-        })
-    }
+    // fn get_post_content(&self, idx: usize) -> Option<String> {
+    //     self.with_read_database(|db| {
+    //         let mut posts = db.posts();
+    //         let name = posts.nth(idx)?;
+    //
+    //         Some(db.post_content(name)?)
+    //     })
+    // }
 
 
     // fn borrow_data(&mut self) -> u32 {
