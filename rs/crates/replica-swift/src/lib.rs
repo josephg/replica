@@ -1,19 +1,31 @@
 use std::ffi::c_void;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::ptr::null;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use diamond_types::experiments::ExperimentalBranch;
+use diamond_types::list::operation::TextOperation;
 use diamond_types::LV;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::broadcast::Sender;
 use replica::connect;
 use replica::database::Database;
 
-// type DatabaseHandle<'a> = RwLockReadGuard<'a, Database>;
-
 #[swift_bridge::bridge]
 mod ffi {
+    // #[swift_bridge::bridge(swift_repr = "struct")]
+    // struct BridgeTextOperation {
+    //     /// The range of items in the document being modified by this operation.
+    //     pub start: usize,
+    //     pub end: usize,
+    //
+    //     /// Is this operation an insert or a delete?
+    //     pub is_insert: bool,
+    //
+    //     /// What content is being inserted or deleted. Empty string for deletes.
+    //     pub content: String,
+    // }
+
     extern "Rust" {
         // type DatabaseHandle;
         //     #[swift_bridge::bridge(swift_repr = "struct")]
@@ -27,17 +39,67 @@ mod ffi {
     extern "Rust" {
         type Branch;
 
+        fn get_version(&self) -> Vec<usize>;
+
         fn get_post_content(&self) -> String;
+        fn update(&mut self, db: *mut DatabaseConnection) -> bool;
+        // fn xf_operations_since(&self, frontier: &[usize]) -> Vec<BridgeTextOperation>;
+
+        fn replace_content_wchar(&mut self, db: *mut DatabaseConnection, replace_start: usize, replace_end: usize, ins_content: String);
     }
+
 }
 
-pub struct Branch(ExperimentalBranch);
+pub struct Branch {
+    doc_name: LV,
+    content: ExperimentalBranch
+}
+
 
 impl Branch {
-    fn get_post_content(&self) -> String {
-        let content_crdt = self.0.text_at_path(&["content"]);
-        self.0.texts.get(&content_crdt).unwrap().to_string()
+    fn get_version(&self) -> Vec<usize> {
+        self.content.frontier.iter().copied().collect()
     }
+
+    fn get_post_content(&self) -> String {
+        let content_crdt = self.content.text_at_path(&["content"]);
+        self.content.texts.get(&content_crdt).unwrap().to_string()
+    }
+
+    fn update(&mut self, db: *mut DatabaseConnection) -> bool {
+        let db = unsafe { &mut *db };
+
+        // with_read_database blocks, so this should be threadsafe (so long as branch is is Send).
+        db.with_read_database(|db| {
+            db.update_branch(self.doc_name, &mut self.content)
+        })
+    }
+
+    fn replace_content_wchar(&mut self, db: *mut DatabaseConnection, replace_start_wchars: usize, replace_end_wchars: usize, ins_content: String) {
+        let db = unsafe { &mut *db };
+        db.with_write_database(|mut db| {
+            let (oplog, agent) = db.get_doc_mut(self.doc_name).unwrap();
+            let content_crdt = oplog.text_at_path(&["content"]);
+
+            let rope = self.content.texts.get(&content_crdt).unwrap().borrow();
+            let start_chars = rope.wchars_to_chars(replace_start_wchars);
+            if replace_start_wchars != replace_end_wchars {
+                let end_chars = rope.wchars_to_chars(replace_end_wchars);
+                oplog.local_text_op(agent, content_crdt, TextOperation::new_delete(start_chars..end_chars));
+            }
+            drop(rope);
+            if !ins_content.is_empty() {
+                oplog.local_text_op(agent, content_crdt, TextOperation::new_insert(start_chars, &ins_content));
+            }
+
+            // This could be massively optimized, since we know we can FF.
+            self.content.merge_changes_to_tip(&oplog);
+
+            db.doc_updated(self.doc_name);
+        });
+        db.sender.send(0).unwrap();
+    }
+
 }
 
 fn foo() -> Vec<usize> {
@@ -71,6 +133,17 @@ pub extern "C" fn database_start(this: *mut DatabaseConnection, signal_data: *mu
 }
 
 // #[no_mangle]
+// pub extern "C" fn database_update_branch(this: *mut DatabaseConnection, doc_name: usize, branch: *mut c_void) -> bool {
+//     let this = unsafe { &mut *this };
+//     let branch = unsafe { &mut *(branch as *mut ExperimentalBranch) };
+//
+//     // with_read_database blocks, so this should be threadsafe (so long as branch is is Send).
+//     this.with_read_database(|db| {
+//         db.update_branch(doc_name, branch)
+//     })
+// }
+
+// #[no_mangle]
 // pub extern "C" fn with_db(this: *mut DatabaseConnection, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, *const DatabaseHandle) -> ()) {
 //     let this = unsafe { &mut *this };
 //     this.with_read_database(|db| {
@@ -96,15 +169,19 @@ pub extern "C" fn database_get_edits_since(this: *mut DatabaseConnection, doc_na
     cb(signal_data, num);
 }
 
+// pub extern "C" fn database_checkout(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *mut Branch) -> ()) {
 #[no_mangle]
-pub extern "C" fn database_checkout(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *mut Branch) -> ()) {
+pub extern "C" fn database_checkout(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *mut c_void) -> ()) {
     let this = unsafe { &mut *this };
     let post = this.with_read_database(|db| {
         db.checkout(doc_name)
     }).unwrap();
 
-    let ptr = Box::into_raw(Box::new(Branch(post)));
-    cb(signal_data, ptr);
+    let ptr = Box::into_raw(Box::new(Branch {
+        doc_name,
+        content: post
+    }));
+    cb(signal_data, ptr as *mut c_void);
 }
 // #[no_mangle]
 // pub extern "C" fn database_get_post_content(this: *mut DatabaseConnection, doc_name: usize, signal_data: *mut c_void, cb: extern "C" fn(*mut c_void, content: *const u8) -> ()) {
@@ -132,7 +209,7 @@ pub struct DatabaseConnection {
     tokio_handle: Option<Handle>,
     db_handle: Arc<RwLock<Database>>,
     running: AtomicBool,
-    // s: Sender<usize>,
+    sender: Sender<usize>,
 }
 
 impl Drop for DatabaseConnection {
@@ -148,13 +225,16 @@ impl Drop for DatabaseConnection {
 
 impl DatabaseConnection {
     fn new() -> Self {
-        let mut database = Database::new();
+        let database = Database::new();
         // database.create_post();
+
+        let (sender, _) = tokio::sync::broadcast::channel(16);
 
         DatabaseConnection {
             tokio_handle: None,
             db_handle: Arc::new(RwLock::new(database)),
             running: AtomicBool::new(false),
+            sender,
         }
     }
 
@@ -169,15 +249,13 @@ impl DatabaseConnection {
 
         let handle = self.db_handle.clone();
 
+        let (tx, mut rx) = (self.sender.clone(), self.sender.subscribe());
         std::thread::spawn(move || {
             rt.block_on(async {
-                let (tx, mut rx) = tokio::sync::broadcast::channel(16);
 
                 // let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4444);
-                connect(vec![
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4444),
-                    // SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4444),
-                ], handle.clone(), tx);
+                let socket_addrs = "test.replica.tech:443".to_socket_addrs().unwrap();
+                connect(socket_addrs.collect(), handle.clone(), tx);
 
                 // callback(t);
                 loop {
@@ -201,6 +279,7 @@ impl DatabaseConnection {
             f(reader)
         })
     }
+    #[allow(unused)]
     fn with_write_database<F: FnOnce(RwLockWriteGuard<Database>) -> R, R>(&mut self, f: F) -> R {
         let data = self.db_handle.clone();
         self.tokio_handle.as_ref().unwrap().block_on(async move {

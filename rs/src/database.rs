@@ -133,4 +133,11 @@ impl Database {
         self.docs.get(&doc)
             .map(|oplog| oplog.checkout_tip())
     }
+
+    /// returns if there were updates
+    pub fn update_branch(&self, doc: DocName, branch: &mut ExperimentalBranch) -> bool {
+        let oplog = self.docs.get(&doc).unwrap();
+        let merged_versions = branch.merge_changes_to_tip(oplog);
+        !merged_versions.is_empty()
+    }
 }

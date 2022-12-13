@@ -32,6 +32,25 @@ public func db_get_posts(db: OpaquePointer, signal_data: UnsafeMutableRawPointer
     database_get_posts(db, signal_data, signal)
 }
 
+
+//void database_checkout(struct DatabaseConnection *this_,
+//uintptr_t doc_name,
+//void *signal_data,
+//void (*cb)(void*, struct Branch *content));
+
+public func db_checkout(db: OpaquePointer, doc_name: UInt, signal_data: UnsafeMutableRawPointer?, signal: (@convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void)) {
+    database_checkout(db, doc_name, signal_data, signal)
+}
+
+//public func db_update_branch(db: OpaquePointer, doc_name: UInt, branch: BranchRefMut) {
+//    database_update_branch(db, doc_name, branch.ptr)
+//}
+
+//void database_update_branch(struct DatabaseConnection *this_,
+//LV doc_name,
+//ExperimentalBranch *branch);
+
+
 //
 //void hello_world(void);
 //

@@ -44,8 +44,7 @@ type DatabaseHandle = Arc<RwLock<Database>>;
 async fn send_message<'a, W: AsyncWrite + Unpin>(stream: &mut W, msg: NetMessage<'a>) -> Result<(), io::Error> {
     let mut msg = serde_json::to_vec(&msg).unwrap();
     msg.push(b'\n');
-    print!("WRITE {}", std::str::from_utf8(&msg).unwrap());
-    // stdout().write_all(&msg).unwrap();
+    // print!("WRITE {}", std::str::from_utf8(&msg).unwrap());
     stream.write_all(&msg).await
 }
 
@@ -301,7 +300,7 @@ impl<'a> Protocol<'a> {
             select! {
                 line = line_reader.next_line() => {
                     if let Some(line) = line? {
-                        println!("READ {line}");
+                        // println!("READ {line}");
 
                         let msg: NetMessage = serde_json::from_str(&line)?;
                         self.handle_message(msg, &mut writer).await?;

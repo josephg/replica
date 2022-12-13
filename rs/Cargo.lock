@@ -239,9 +239,9 @@ checksum = "4217ad341ebadf8d8e724e264f13e593e0648f5b3e94b3896a5df283be015ecc"
 
 [[package]]
 name = "jumprope"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f3b859c9b8c26d76430ad721588281bfdd3f4af252d27f2ce6db5b18502d135"
+checksum = "76ff13229092ab69baa5e45e49e3ebf75637ca61061b5c233b7d2eb3e91855a2"
 dependencies = [
  "rand",
  "str_indices",
@@ -495,6 +495,7 @@ version = "0.1.0"
 dependencies = [
  "cbindgen",
  "diamond-types",
+ "jumprope",
  "replica",
  "swift-bridge",
  "swift-bridge-build",
