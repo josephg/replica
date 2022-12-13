@@ -90,6 +90,7 @@ impl<'a> Protocol<'a> {
         if let Some(subs) = subs {
             for key in db.inbox.modified_keys_since_frontier(since_frontier.as_ref()) {
                 if let Some(known_frontier) = subs.get_mut(&key) {
+                    println!("Getting doc {} ops since {:?}", key, known_frontier.as_ref());
                     // We might not have any new operations for the doc yet, or even know about it.
                     let Some(doc) = db.docs.get(&key) else { continue; };
 
@@ -97,6 +98,7 @@ impl<'a> Protocol<'a> {
                         let remote_name = db.inbox.cg.agent_assignment.local_to_remote_version(key);
                         let ops = doc.ops_since(known_frontier.as_ref());
                         sub_deltas.push((remote_name, ops));
+                        subs.insert(key, doc.cg.version.clone());
                     }
                 }
             }
@@ -115,7 +117,7 @@ impl<'a> Protocol<'a> {
             doc.merge_ops(changes).unwrap(); // TODO: Pass error correctly.
 
             // println!("doc {} -> version {:?}, data: {:?}", local_name, doc.cg.version, doc.checkout());
-            println!("updated doc {} ({:?})", local_name, remote_name);
+            println!("updated doc {} ({:?}) to version {:?}", local_name, remote_name, doc.cg.version.as_ref());
         }
 
         for (local_name, doc) in db.docs.iter() {

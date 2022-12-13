@@ -59,9 +59,28 @@ impl Database {
         let agent = doc.cg.agent_assignment.get_or_create_agent_id("SCHEMA");
         let title = doc.local_map_set(agent, ROOT_CRDT_ID, "title", CreateValue::NewCRDT(CRDTKind::Text));
         doc.local_text_op(agent, title, TextOperation::new_insert(0, "Untitled"));
-        doc.local_map_set(agent, ROOT_CRDT_ID, "content", CreateValue::NewCRDT(CRDTKind::Text));
+        let content = doc.local_map_set(agent, ROOT_CRDT_ID, "content", CreateValue::NewCRDT(CRDTKind::Text));
+        doc.local_text_op(agent, content, TextOperation::new_insert(0, "yo check out this sick post"));
+        // dbg!(&doc.cg.version);
 
         self.insert_new_item("post", doc)
+    }
+
+    pub fn doc_updated(&mut self, item: DocName) {
+        let Some(existing_value) = self.inbox.get_value(item) else { return; };
+
+        let Some(doc) = self.docs.get(&item) else { return; };
+
+        // TODO: Change to a borrowed frontier.
+        let doc_rv = doc.cg.agent_assignment.local_to_remote_frontier_owned(doc.cg.version.as_ref());
+        if existing_value.version != doc_rv {
+            let mut new_value = existing_value.clone();
+            new_value.version = doc_rv;
+            self.inbox.local_set(self.index_agent, Some(item), new_value);
+        }
+        // pair.
+        // let old_val = self.inbox.resolve_pairs()
+        // self.inbox.local_set(self.index_agent, Some(item))
     }
 
     pub fn posts(&self) -> impl Iterator<Item=DocName> + '_ {

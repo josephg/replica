@@ -247,6 +247,12 @@ impl<T: Clone> StateSet<T> {
         self.values.get(&key)
             .map(|pairs| pairs.iter().map(|(_, val)| val))
     }
+
+    pub fn get_value(&self, key: DocName) -> Option<&T> {
+        let pairs = self.values.get(&key)?;
+        // Some(self.resolve_pairs(pairs))
+        Some(&self.resolve_pairs(pairs).1)
+    }
 }
 
 type CGDelta<'a> = SmallVec<[PartialCGEntry<'a>; 4]>;
