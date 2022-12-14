@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use diamond_types::experiments::ExperimentalBranch;
@@ -254,7 +254,7 @@ impl DatabaseConnection {
             rt.block_on(async {
 
                 // let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4444);
-                let socket_addrs = "test.replica.tech:443".to_socket_addrs().unwrap();
+                let socket_addrs = "test.replica.tech:4444".to_socket_addrs().unwrap();
                 connect(socket_addrs.collect(), handle.clone(), tx);
 
                 // callback(t);
