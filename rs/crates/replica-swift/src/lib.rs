@@ -1,11 +1,11 @@
 use std::ffi::c_void;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use diamond_types::experiments::ExperimentalBranch;
 use diamond_types::list::operation::TextOperation;
 use diamond_types::LV;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Handle;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::broadcast::Sender;
 use replica::connect;
@@ -244,7 +244,7 @@ impl DatabaseConnection {
             panic!("Tokio runtime already started");
         }
 
-        let rt = Runtime::new().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         self.tokio_handle = Some(rt.handle().clone());
 
         let handle = self.db_handle.clone();
