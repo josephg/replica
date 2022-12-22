@@ -36,7 +36,9 @@ pub fn connect(addr: Vec<SocketAddr>, mut handle: Arc<RwLock<Database>>, tx: Sen
 
             if let Some(socket) = socket {
                 let (tx2, rx2) = (tx.clone(), tx.subscribe());
-                Protocol::start(socket, &mut handle, (tx2, rx2)).await.unwrap();
+                if let Err(e) = Protocol::start(socket, &mut handle, (tx2, rx2)).await {
+                    println!("Could not connect: {:?}", e);
+                }
                 println!("Disconnected! :(");
             } else {
                 eprintln!("Could not connect to requested peer");
