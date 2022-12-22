@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use smallvec::{SmallVec, smallvec};
 use crate::cg_hacks::{merge_partial_versions, PartialCGEntry, serialize_cg_from_version};
 
-pub type DocName = LV;
+pub type LVKey = LV;
 
 type Pair<T> = (LV, T);
 // type RawPair<T> = (RemoteId, T);
@@ -25,10 +25,10 @@ type RawPair<'a, T> = (RemoteVersion<'a>, T);
 
 #[derive(Debug, Clone)]
 pub(crate) struct StateSet<T: Clone> {
-    pub(crate) values: BTreeMap<DocName, SmallVec<[Pair<T>; 1]>>,
+    pub(crate) values: BTreeMap<LVKey, SmallVec<[Pair<T>; 1]>>,
 
     // Internal from version -> value at that version
-    pub(crate) index: BTreeMap<LV, DocName>,
+    pub(crate) index: BTreeMap<LV, LVKey>,
 
     // pub(crate) version: Frontier,
     pub(crate) cg: CausalGraph,
@@ -71,13 +71,13 @@ impl<T: Clone> StateSet<T> {
         self.local_set(agent_id, None, value)
     }
 
-    pub fn modified_keys_since_v(&self, since_v: LV) -> impl Iterator<Item=DocName> + '_ {
+    pub fn modified_keys_since_v(&self, since_v: LV) -> impl Iterator<Item=LVKey> + '_ {
         self.index.range(since_v..).map(|(_v, &key)| {
             key
         })
     }
 
-    pub fn modified_keys_since_frontier(&self, since: &[LV]) -> impl Iterator<Item=DocName> + '_ {
+    pub fn modified_keys_since_frontier(&self, since: &[LV]) -> impl Iterator<Item=LVKey> + '_ {
         let diff = self.cg.graph.diff(since, self.cg.version.as_ref()).1;
         diff.into_iter().flat_map(|range| {
             self.index.range(range).map(|(_v, &key)| {
@@ -243,12 +243,12 @@ impl<T: Clone> StateSet<T> {
     }
 
     #[allow(unused)]
-    fn get_values_ref(&self, key: DocName) -> Option<impl Iterator<Item = &T>> {
+    fn get_values_ref(&self, key: LVKey) -> Option<impl Iterator<Item = &T>> {
         self.values.get(&key)
             .map(|pairs| pairs.iter().map(|(_, val)| val))
     }
 
-    pub fn get_value(&self, key: DocName) -> Option<&T> {
+    pub fn get_value(&self, key: LVKey) -> Option<&T> {
         let pairs = self.values.get(&key)?;
         // Some(self.resolve_pairs(pairs))
         Some(&self.resolve_pairs(pairs).1)
@@ -287,7 +287,7 @@ impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
 
         // dbg!(&ranges);
 
-        let mut docs: BTreeMap<DocName, SmallVec<[Pair<T>; 2]>> = Default::default();
+        let mut docs: BTreeMap<LVKey, SmallVec<[Pair<T>; 2]>> = Default::default();
         // let mut ops = smallvec![];
         for r in ranges {
             for (v, key) in self.index.range(r) {

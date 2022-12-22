@@ -14,7 +14,7 @@ use tokio::net::tcp::WriteHalf;
 use tokio::select;
 use crate::cg_hacks::advance_frontier_from_serialized;
 use crate::database::{Database, InboxEntry};
-use crate::stateset::{DocName, RemoteStateDelta};
+use crate::stateset::{LVKey, RemoteStateDelta};
 use serde::{Serialize, Deserialize};
 use smallvec::{SmallVec, smallvec};
 
@@ -53,8 +53,8 @@ struct ConnectionState {
     remote_frontier: Frontier,
     unknown_versions: Option<VersionSummaryFlat>,
 
-    my_subscriptions: BTreeSet<DocName>,
-    remote_subscriptions: BTreeMap<DocName, Frontier>, // Storing the last known version on the remote peer.
+    my_subscriptions: BTreeSet<LVKey>,
+    remote_subscriptions: BTreeMap<LVKey, Frontier>, // Storing the last known version on the remote peer.
 }
 
 type IndexChannel = (broadcast::Sender<usize>, broadcast::Receiver<usize>);
@@ -82,7 +82,7 @@ impl<'a> Protocol<'a> {
         }
     }
 
-    async fn send_delta<D: Deref<Target=Database>>(since_frontier: &mut Frontier, db: D, subs: Option<&mut BTreeMap<DocName, Frontier>>, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
+    async fn send_delta<D: Deref<Target=Database>>(since_frontier: &mut Frontier, db: D, subs: Option<&mut BTreeMap<LVKey, Frontier>>, writer: &mut WriteHalf<'_>) -> Result<(), io::Error> {
         let idx_delta = db.inbox.delta_since(since_frontier.as_ref());
 
         let mut sub_deltas = smallvec![];

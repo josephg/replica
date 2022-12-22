@@ -7,7 +7,7 @@ use diamond_types::experiments::{ExperimentalBranch, ExperimentalOpLog, Serializ
 use diamond_types::list::operation::TextOperation;
 use rand::Rng;
 use smallvec::SmallVec;
-use crate::stateset::{DocName, StateSet};
+use crate::stateset::{LVKey, StateSet};
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct InboxEntry {
@@ -22,7 +22,7 @@ impl InboxEntry {
 #[derive(Debug)]
 pub struct Database {
     pub(crate) inbox: StateSet<InboxEntry>,
-    pub(crate) docs: BTreeMap<DocName, ExperimentalOpLog>,
+    pub(crate) docs: BTreeMap<LVKey, ExperimentalOpLog>,
     pub(crate) index_agent: AgentId,
 }
 
@@ -44,7 +44,7 @@ impl Database {
         }
     }
 
-    pub fn insert_new_item(&mut self, kind: &str, doc: ExperimentalOpLog) -> DocName {
+    pub fn insert_new_item(&mut self, kind: &str, doc: ExperimentalOpLog) -> LVKey {
         let id = self.inbox.local_insert(self.index_agent, InboxEntry {
             version: doc.cg.remote_frontier_owned(),
             kind: kind.into(),
@@ -53,7 +53,7 @@ impl Database {
         id
     }
 
-    pub fn create_post(&mut self) -> DocName {
+    pub fn create_post(&mut self) -> LVKey {
         // To avoid sync problems, we'll initialize the post entirely using a special SCHEMA user.
         let mut doc = ExperimentalOpLog::new();
         let agent = doc.cg.agent_assignment.get_or_create_agent_id("SCHEMA");
@@ -66,7 +66,7 @@ impl Database {
         self.insert_new_item("post", doc)
     }
 
-    pub fn doc_updated(&mut self, item: DocName) {
+    pub fn doc_updated(&mut self, item: LVKey) {
         let Some(existing_value) = self.inbox.get_value(item) else { return; };
 
         let Some(doc) = self.docs.get(&item) else { return; };
@@ -83,7 +83,7 @@ impl Database {
         // self.inbox.local_set(self.index_agent, Some(item))
     }
 
-    pub fn posts(&self) -> impl Iterator<Item=DocName> + '_ {
+    pub fn posts(&self) -> impl Iterator<Item=LVKey> + '_ {
         self.inbox.values.iter().filter_map(|(doc_name, pairs)| {
             let val = &self.inbox.resolve_pairs(pairs.as_slice()).1;
             if val.kind == "post" {
@@ -96,7 +96,7 @@ impl Database {
         self.inbox.cg.agent_assignment.get_agent_name(self.index_agent)
     }
 
-    pub fn get_doc_mut(&mut self, key: DocName) -> Option<(&mut ExperimentalOpLog, AgentId)> {
+    pub fn get_doc_mut(&mut self, key: LVKey) -> Option<(&mut ExperimentalOpLog, AgentId)> {
         self.docs.get_mut(&key)
             .map(|doc| {
                 let agent_name = self.inbox.cg.agent_assignment.get_agent_name(self.index_agent);
@@ -105,12 +105,12 @@ impl Database {
             })
     }
 
-    pub fn changes_to_doc_since(&self, doc: DocName, v: &[LV]) -> Option<SerializedOps> {
+    pub fn changes_to_doc_since(&self, doc: LVKey, v: &[LV]) -> Option<SerializedOps> {
         let doc = self.docs.get(&doc)?;
         Some(doc.ops_since(v))
     }
 
-    pub fn changes_to_post_content_since(&self, doc: DocName, v: &[LV]) -> Option<(Vec<TextOperation>, Frontier)> {
+    pub fn changes_to_post_content_since(&self, doc: LVKey, v: &[LV]) -> Option<(Vec<TextOperation>, Frontier)> {
         let doc = self.docs.get(&doc)?;
 
         let content = doc.text_at_path(&["content"]);
@@ -123,19 +123,19 @@ impl Database {
         ))
     }
 
-    pub fn post_content(&self, doc: DocName) -> Option<String> {
+    pub fn post_content(&self, doc: LVKey) -> Option<String> {
         let doc = self.docs.get(&doc)?;
         let content = doc.text_at_path(&["content"]);
         Some(doc.checkout_text(content).to_string())
     }
 
-    pub fn checkout(&self, doc: DocName) -> Option<ExperimentalBranch> {
+    pub fn checkout(&self, doc: LVKey) -> Option<ExperimentalBranch> {
         self.docs.get(&doc)
             .map(|oplog| oplog.checkout_tip())
     }
 
     /// returns if there were updates
-    pub fn update_branch(&self, doc: DocName, branch: &mut ExperimentalBranch) -> bool {
+    pub fn update_branch(&self, doc: LVKey, branch: &mut ExperimentalBranch) -> bool {
         let oplog = self.docs.get(&doc).unwrap();
         let merged_versions = branch.merge_changes_to_tip(oplog);
         !merged_versions.is_empty()
