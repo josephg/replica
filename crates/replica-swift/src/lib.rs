@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use diamond_types::experiments::ExperimentalBranch;
+use diamond_types::Branch;
 use diamond_types::list::operation::TextOperation;
 use diamond_types::LV;
 use tokio::runtime::Handle;
@@ -26,6 +26,7 @@ mod ffi {
     //     pub content: String,
     // }
 
+
     extern "Rust" {
         // type DatabaseHandle;
         //     #[swift_bridge::bridge(swift_repr = "struct")]
@@ -37,7 +38,7 @@ mod ffi {
     }
 
     extern "Rust" {
-        type Branch;
+        type LocalBranch;
 
         fn get_version(&self) -> Vec<usize>;
 
@@ -50,13 +51,13 @@ mod ffi {
 
 }
 
-pub struct Branch {
+pub struct LocalBranch {
     doc_name: LV,
-    content: ExperimentalBranch
+    content: Branch
 }
 
 
-impl Branch {
+impl LocalBranch {
     fn get_version(&self) -> Vec<usize> {
         self.content.frontier.iter().copied().collect()
     }
@@ -177,7 +178,7 @@ pub extern "C" fn database_checkout(this: *mut DatabaseConnection, doc_name: usi
         db.checkout(doc_name)
     }).unwrap();
 
-    let ptr = Box::into_raw(Box::new(Branch {
+    let ptr = Box::into_raw(Box::new(LocalBranch {
         doc_name,
         content: post
     }));
