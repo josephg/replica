@@ -3,7 +3,7 @@ use smartstring::alias::String as SmartString;
 use rand::distributions::Alphanumeric;
 use diamond_types::{AgentId, CRDTKind, CreateValue, Frontier, LV, ROOT_CRDT_ID};
 use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersionOwned;
-use diamond_types::experiments::{ExperimentalBranch, ExperimentalOpLog, SerializedOps};
+use diamond_types::{Branch, OpLog, SerializedOps};
 use diamond_types::list::operation::TextOperation;
 use rand::Rng;
 use smallvec::SmallVec;
@@ -22,7 +22,7 @@ impl InboxEntry {
 #[derive(Debug)]
 pub struct Database {
     pub(crate) inbox: StateSet<InboxEntry>,
-    pub(crate) docs: BTreeMap<LVKey, ExperimentalOpLog>,
+    pub(crate) docs: BTreeMap<LVKey, OpLog>,
     pub(crate) index_agent: AgentId,
 }
 
@@ -44,7 +44,7 @@ impl Database {
         }
     }
 
-    pub fn insert_new_item(&mut self, kind: &str, doc: ExperimentalOpLog) -> LVKey {
+    pub fn insert_new_item(&mut self, kind: &str, doc: OpLog) -> LVKey {
         let id = self.inbox.local_insert(self.index_agent, InboxEntry {
             version: doc.cg.remote_frontier_owned(),
             kind: kind.into(),
@@ -55,7 +55,7 @@ impl Database {
 
     pub fn create_post(&mut self) -> LVKey {
         // To avoid sync problems, we'll initialize the post entirely using a special SCHEMA user.
-        let mut doc = ExperimentalOpLog::new();
+        let mut doc = OpLog::new();
         let agent = doc.cg.agent_assignment.get_or_create_agent_id("SCHEMA");
         let title = doc.local_map_set(agent, ROOT_CRDT_ID, "title", CreateValue::NewCRDT(CRDTKind::Text));
         doc.local_text_op(agent, title, TextOperation::new_insert(0, "Untitled"));
@@ -96,7 +96,7 @@ impl Database {
         self.inbox.cg.agent_assignment.get_agent_name(self.index_agent)
     }
 
-    pub fn get_doc_mut(&mut self, key: LVKey) -> Option<(&mut ExperimentalOpLog, AgentId)> {
+    pub fn get_doc_mut(&mut self, key: LVKey) -> Option<(&mut OpLog, AgentId)> {
         self.docs.get_mut(&key)
             .map(|doc| {
                 let agent_name = self.inbox.cg.agent_assignment.get_agent_name(self.index_agent);
@@ -129,13 +129,13 @@ impl Database {
         Some(doc.checkout_text(content).to_string())
     }
 
-    pub fn checkout(&self, doc: LVKey) -> Option<ExperimentalBranch> {
+    pub fn checkout(&self, doc: LVKey) -> Option<Branch> {
         self.docs.get(&doc)
             .map(|oplog| oplog.checkout_tip())
     }
 
     /// returns if there were updates
-    pub fn update_branch(&self, doc: LVKey, branch: &mut ExperimentalBranch) -> bool {
+    pub fn update_branch(&self, doc: LVKey, branch: &mut Branch) -> bool {
         let oplog = self.docs.get(&doc).unwrap();
         let merged_versions = branch.merge_changes_to_tip(oplog);
         !merged_versions.is_empty()

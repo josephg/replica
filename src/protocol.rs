@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use std::ops::{Deref, DerefMut};
 use std::string::ParseError;
 use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
-use diamond_types::experiments::SerializedOps;
+use diamond_types::SerializedOps;
 use tokio::net::tcp::WriteHalf;
 use tokio::select;
 use crate::cg_hacks::advance_frontier_from_serialized;
