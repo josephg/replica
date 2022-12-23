@@ -13,43 +13,47 @@ use tokio::sync::RwLock;
 use crate::database::Database;
 use crate::protocol::Protocol;
 
-pub fn connect(addr: Vec<SocketAddr>, mut handle: Arc<RwLock<Database>>, tx: Sender<usize>) {
-    tokio::spawn(async move {
-        loop {
-            println!("Trying to connect to {:?} ...", addr);
-            // Walk through the socket addresses trying to connect
-            let mut socket = None;
-            for a in &addr {
-                dbg!(a);
-                let s = TcpStream::connect(a).await;
-                match s {
-                    Ok(s) => {
-                        socket = Some(s);
-                        break;
-                    }
-                    Err(err) => {
-                        eprintln!("Could not connect to {}: {}", a, err);
-                    }
-                }
-            };
-            println!("ok so far...");
+pub fn connect(addr: Vec<SocketAddr>, handle: Arc<RwLock<Database>>, tx: Sender<usize>) {
+    tokio::spawn(
+        connect_internal(addr, handle, tx)
+    );
+}
 
-            if let Some(socket) = socket {
-                let (tx2, rx2) = (tx.clone(), tx.subscribe());
-                if let Err(e) = Protocol::start(socket, &mut handle, (tx2, rx2)).await {
-                    println!("Could not connect: {:?}", e);
+pub async fn connect_internal(addr: Vec<SocketAddr>, mut handle: Arc<RwLock<Database>>, tx: Sender<usize>) -> Result<(), io::Error> {
+    loop {
+        println!("Trying to connect to {:?} ...", addr);
+        // Walk through the socket addresses trying to connect
+        let mut socket = None;
+        for a in &addr {
+            dbg!(a);
+            let s = TcpStream::connect(a).await;
+            match s {
+                Ok(s) => {
+                    socket = Some(s);
+                    break;
                 }
-                println!("Disconnected! :(");
-            } else {
-                eprintln!("Could not connect to requested peer");
+                Err(err) => {
+                    eprintln!("Could not connect to {}: {}", a, err);
+                }
             }
+        };
+        println!("ok so far...");
 
-            tokio::time::sleep(Duration::from_secs(3)).await;
+        if let Some(socket) = socket {
+            let (tx2, rx2) = (tx.clone(), tx.subscribe());
+            if let Err(e) = Protocol::start(socket, &mut handle, (tx2, rx2)).await {
+                println!("Could not connect: {:?}", e);
+            }
+            println!("Disconnected! :(");
+        } else {
+            eprintln!("Could not connect to requested peer");
         }
 
-        #[allow(unreachable_code)]
-        Ok::<(), io::Error>(())
-    });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+
+    // #[allow(unreachable_code)]
+    // Ok::<(), io::Error>(())
 }
 
 pub fn listen(port: u16, handle: Arc<RwLock<Database>>, tx: Sender<usize>) {

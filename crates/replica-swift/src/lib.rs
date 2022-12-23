@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use diamond_types::Branch;
@@ -8,7 +8,7 @@ use diamond_types::LV;
 use tokio::runtime::Handle;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::broadcast::Sender;
-use replica::connect;
+use replica::connect_internal;
 use replica::database::Database;
 
 #[swift_bridge::bridge]
@@ -133,6 +133,16 @@ pub extern "C" fn database_start(this: *mut DatabaseConnection, signal_data: *mu
     });
 }
 
+/// Eg "localhost:4444".
+#[no_mangle]
+pub extern "C" fn database_connect(this: *mut DatabaseConnection, remote_host: *mut swift_bridge::string::RustString) {
+    let this = unsafe { &mut *this };
+
+    let remote_host = unsafe { Box::from_raw(remote_host).0 };
+    this.connect(remote_host.to_socket_addrs().unwrap());
+}
+
+
 // #[no_mangle]
 // pub extern "C" fn database_update_branch(this: *mut DatabaseConnection, doc_name: usize, branch: *mut c_void) -> bool {
 //     let this = unsafe { &mut *this };
@@ -248,15 +258,16 @@ impl DatabaseConnection {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
         self.tokio_handle = Some(rt.handle().clone());
 
-        let handle = self.db_handle.clone();
+        // let handle = self.db_handle.clone();
 
-        let (tx, mut rx) = (self.sender.clone(), self.sender.subscribe());
+        // let (tx, mut rx) = (self.sender.clone(), self.sender.subscribe());
+        let mut rx = self.sender.subscribe();
         std::thread::spawn(move || {
             rt.block_on(async {
 
                 // let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4444);
-                let socket_addrs = "test.replica.tech:4444".to_socket_addrs().unwrap();
-                connect(socket_addrs.collect(), handle.clone(), tx);
+                // let socket_addrs = "test.replica.tech:4444".to_socket_addrs().unwrap();
+                // connect(socket_addrs.collect(), handle.clone(), tx);
 
                 // callback(t);
                 loop {
@@ -271,6 +282,12 @@ impl DatabaseConnection {
                 }
             });
         });
+    }
+
+    fn connect<S: Iterator<Item=SocketAddr>>(&mut self, addr: S) {
+        self.tokio_handle.as_ref().unwrap().spawn(
+            connect_internal(addr.collect(), self.db_handle.clone(), self.sender.clone())
+        );
     }
 
     fn with_read_database<F: FnOnce(RwLockReadGuard<Database>) -> R, R>(&self, f: F) -> R {
