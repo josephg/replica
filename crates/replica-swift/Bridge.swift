@@ -42,6 +42,12 @@ public func db_checkout(db: OpaquePointer, doc_name: UInt, signal_data: UnsafeMu
     database_checkout(db, doc_name, signal_data, signal)
 }
 
+public func db_connect<GenericIntoRustString: IntoRustString>(db: OpaquePointer, remote_host: GenericIntoRustString) {
+    let rustString = remote_host.intoRustString();
+    rustString.isOwned = false;
+    database_connect(db, OpaquePointer(rustString.ptr))
+}
+
 //public func db_update_branch(db: OpaquePointer, doc_name: UInt, branch: BranchRefMut) {
 //    database_update_branch(db, doc_name, branch.ptr)
 //}
