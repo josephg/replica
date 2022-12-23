@@ -28,6 +28,8 @@ async fn main() {
     let mut db = Database::new();
 
     db.create_post();
+    db.dbg_print_docs();
+
     // let name = db.create_item();
     // let (doc, agent) = db.get_doc_mut(name).unwrap();
     // doc.local_map_set(agent, ROOT_CRDT_ID, "yo", CreateValue::Primitive(Primitive::I64(rand::thread_rng().next_u32() as i64)));

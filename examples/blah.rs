@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use diamond_types::list::operation::TextOperation;
-use tokio::runtime::{Handle, Runtime};
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::runtime::{Builder, Handle};
+use tokio::sync::RwLock;
 use replica::connect;
 use replica::database::Database;
 
@@ -43,7 +43,7 @@ impl DatabaseHandle {
             panic!("Tokio runtime already started");
         }
 
-        let rt = Runtime::new().unwrap();
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
         self.tokio_handle = Some(rt.handle().clone());
 
         let handle = self.db_handle.clone();
@@ -58,11 +58,22 @@ impl DatabaseHandle {
                     // SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 4444),
                 ], handle.clone(), tx.clone());
 
+                let post_name = loop {
+                    rx.recv().await.unwrap();
+                    let db = handle.read().await;
+                    db.dbg_print_docs();
+                    let post = db.posts().next();
+                    if let Some(post) = post {
+                        break post;
+                    }
+                };
+
                 tokio::spawn(async move {
-                    let post_name = {
-                        let mut db = handle.write().await;
-                        db.create_post()
-                    };
+
+                    // let post_name = {
+                    //     let mut db = handle.write().await;
+                    //     db.create_post()
+                    // };
 
                     // let tx2 = tx.clone();
                     loop {

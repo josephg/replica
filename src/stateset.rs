@@ -50,7 +50,7 @@ impl<T: Clone> StateSet<T> {
         }
     }
 
-    pub fn local_set(&mut self, agent_id: AgentId, key: Option<LV>, value: T) -> LV {
+    fn local_set_internal(&mut self, agent_id: AgentId, key: Option<LV>, value: T) -> LV {
         let v = self.cg.assign_local_op(agent_id, 1).start;
 
         let key = key.unwrap_or(v);
@@ -67,8 +67,20 @@ impl<T: Clone> StateSet<T> {
         v
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
     pub fn local_insert(&mut self, agent_id: AgentId, value: T) -> LV {
-        self.local_set(agent_id, None, value)
+        self.local_set_internal(agent_id, None, value)
+    }
+
+    pub fn local_set(&mut self, agent_id: AgentId, key: LV, value: T) -> LV {
+        self.local_set_internal(agent_id, Some(key), value)
     }
 
     pub fn modified_keys_since_v(&self, since_v: LV) -> impl Iterator<Item=LVKey> + '_ {
@@ -283,13 +295,13 @@ impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
         // dbg!(&self.version);
         let ranges = self.cg.graph.diff(v, self.cg.version.as_ref());
         assert!(ranges.0.is_empty());
-        let ranges = ranges.1;
+        let ranges_rev = ranges.1;
 
         // dbg!(&ranges);
 
         let mut docs: BTreeMap<LVKey, SmallVec<[Pair<T>; 2]>> = Default::default();
         // let mut ops = smallvec![];
-        for r in ranges {
+        for r in ranges_rev {
             for (v, key) in self.index.range(r) {
                 let pair = self.values.get(key)
                     .unwrap()
@@ -315,6 +327,167 @@ impl<T: Clone + Serialize + DeserializeOwned> StateSet<T> {
     }
 }
 
+impl<T: Clone + PartialEq> PartialEq for StateSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        // This isn't optimized or anything.
+        if self.len() != other.len() { return false; }
+        if self.cg != other.cg { return false; }
+
+        for (local_key, local_pairs) in self.values.iter() {
+            let remote_key = self.cg.agent_assignment.local_to_remote_version(*local_key);
+            let other_key = other.cg.agent_assignment.remote_to_local_version(remote_key);
+
+            let Some(other_pairs) = other.values.get(&other_key) else { return false; };
+
+            if local_pairs.len() != other_pairs.len() { return false; }
+
+            for (v, t) in local_pairs.iter() {
+                let rv = self.cg.agent_assignment.local_to_remote_version(*v);
+                let other_v = other.cg.agent_assignment.remote_to_local_version(rv);
+
+                let Some(other_t) = other_pairs.iter().find(|e| e.0 == other_v) else { return false; };
+                if t != &other_t.1 { return false; }
+            }
+        }
+
+        true
+    }
+}
+impl<T: Clone + PartialEq> Eq for StateSet<T> {}
+
+
+#[cfg(test)]
+mod fuzzer {
+    use diamond_types::Frontier;
+    use rand::prelude::*;
+    use crate::stateset::StateSet;
+
+
+    pub(crate) fn choose_2<'a, T>(arr: &'a mut [T], rng: &mut SmallRng) -> (usize, &'a mut T, usize, &'a mut T) {
+        loop {
+            // Then merge 2 branches at random
+            let a_idx = rng.gen_range(0..arr.len());
+            let b_idx = rng.gen_range(0..arr.len());
+
+            if a_idx != b_idx {
+                // Oh god this is awful. I can't take mutable references to two array items.
+                let (a_idx, b_idx) = if a_idx < b_idx { (a_idx, b_idx) } else { (b_idx, a_idx) };
+                // a<b.
+                let (start, end) = arr[..].split_at_mut(b_idx);
+                let a = &mut start[a_idx];
+                let b = &mut end[0];
+
+                return (a_idx, a, b_idx, b);
+            }
+        }
+    }
+
+    fn run_fuzz_once(seed: u64, verbose: bool) {
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut peers = [StateSet::new(), StateSet::new(), StateSet::new()];
+        let agents = ["a", "b", "c"];
+
+        for _i in 0..=80 {
+            if verbose { println!("\n\ni {}", _i); }
+
+            // Generate some operations
+            for _j in 0..2 {
+            // for _j in 0..5 {
+                let idx = rng.gen_range(0..peers.len());
+                let ss = &mut peers[idx];
+                let agent_name = agents[idx];
+                let agent = ss.cg.get_or_create_agent_id(agent_name);
+
+                let val = rng.next_u32();
+                if ss.is_empty() || rng.gen_bool(0.1) {
+                    // Create a new item.
+                    ss.local_insert(agent, val);
+                } else {
+                    // Modify something.
+                    let max_item = ss.values.keys().last().unwrap();
+                    let near_item = rng.gen_range(0..=*max_item);
+                    let key = *ss.values.range_mut(near_item..).next().unwrap().0;
+
+                    ss.local_set(agent, key, val);
+                }
+
+                // ss.dbg_check();
+            }
+
+            let (_a_idx, a, _b_idx, b) = choose_2(&mut peers, &mut rng);
+
+            // dbg!(&a, &b);
+
+            {
+                // dbg!(&b_frontier);
+                let b_frontier = if rng.gen_bool(0.04) {
+                    // Small chance to just sync everything from root. Should verify the code is
+                    // idempotent.
+                    Frontier::root()
+                } else {
+                    let a_summary = a.cg.agent_assignment.summarize_versions_flat();
+                    // dbg!(&a_summary);
+                    let (frontier, _remainder) = b.cg.intersect_with_flat_summary(&a_summary, &[]);
+                    frontier
+                };
+                let delta_1 = b.delta_since(b_frontier.as_ref());
+
+                // dbg!((b_frontier.as_ref(), &delta_1));
+                a.merge_delta(&delta_1.cg, delta_1.ops);
+            }
+
+            {
+                // TODO: Should also be able to use the remainder above to do this.
+                let a_frontier = if rng.gen_bool(0.04) {
+                    // Small chance to just sync everything from root. Should verify the code is
+                    // idempotent.
+                    Frontier::root()
+                } else {
+                    let b_summary = b.cg.agent_assignment.summarize_versions_flat();
+                    // dbg!(&b.cg.agent_assignment);
+                    // dbg!(&b_summary);
+                    let (frontier, _remainder) = a.cg.intersect_with_flat_summary(&b_summary, &[]);
+                    frontier
+                };
+
+                // dbg!(&a_frontier);
+                // dbg!(a.cg.agent_assignment.local_to_remote_frontier(a_frontier.as_ref()));
+                let delta_2 = a.delta_since(a_frontier.as_ref());
+                // dbg!((a_frontier.as_ref(), &delta_2));
+                b.merge_delta(&delta_2.cg, delta_2.ops);
+            }
+
+            // a.dbg_check();
+            // b.dbg_check();
+
+            if _i % 10 == 0 {
+                assert_eq!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_once() {
+        run_fuzz_once(123, true);
+    }
+
+    #[test]
+    fn fuzz_many() {
+        for k in 0..40 {
+            run_fuzz_once(k, false);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn fuzz_forever() {
+        for k in 0.. {
+            if k % 1000 == 0 { println!("{k} ..."); }
+            run_fuzz_once(k, false);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use diamond_types::causalgraph::agent_assignment::remote_ids::RemoteVersion;
@@ -326,7 +499,7 @@ mod tests {
     fn local_insert() {
         let mut ss = StateSet::new();
         let agent = ss.cg.get_or_create_agent_id("seph");
-        ss.local_set(agent, None, 123);
+        ss.local_insert(agent, 123);
 
         ss.dbg_check();
         // dbg!(ss);

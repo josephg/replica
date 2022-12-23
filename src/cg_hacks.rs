@@ -15,11 +15,12 @@ pub(crate) struct PartialCGEntry<'a> {
 }
 
 pub(crate) fn serialize_cg_from_version<'a>(cg: &'a CausalGraph, v: &[LV], cur_version: &[LV]) -> SmallVec<[PartialCGEntry<'a>; 4]> {
-    let ranges = cg.graph.diff(v, cur_version);
-    assert!(ranges.0.is_empty());
+    let ranges_rev = cg.graph.diff_rev(v, cur_version);
+    assert!(ranges_rev.0.is_empty());
 
+    // dbg!(&ranges_rev);
     let mut entries = smallvec![];
-    for r in ranges.1 {
+    for r in ranges_rev.1.into_iter().rev() {
         // dbg!(r, &cg);
         for entry in cg.iter_range(r) {
             entries.push(PartialCGEntry {

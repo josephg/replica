@@ -76,7 +76,7 @@ impl Database {
         if existing_value.version != doc_rv {
             let mut new_value = existing_value.clone();
             new_value.version = doc_rv;
-            self.inbox.local_set(self.index_agent, Some(item), new_value);
+            self.inbox.local_set(self.index_agent, item, new_value);
         }
         // pair.
         // let old_val = self.inbox.resolve_pairs()
@@ -139,5 +139,11 @@ impl Database {
         let oplog = self.docs.get(&doc).unwrap();
         let merged_versions = branch.merge_changes_to_tip(oplog);
         !merged_versions.is_empty()
+    }
+
+    pub fn dbg_print_docs(&self) {
+        for (local_name, doc) in self.docs.iter() {
+            println!("doc {} -> version {:?}, data: {:?}", local_name, doc.cg.version, doc.checkout());
+        }
     }
 }
