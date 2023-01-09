@@ -267,6 +267,7 @@ impl<T: Clone> StateSet<T> {
     }
 }
 
+// TODO: Get rid of CGDelta and replace with a serialized u8.
 type CGDelta<'a> = SmallVec<[PartialCGEntry<'a>; 4]>;
 type SSDelta<'a, T> = SmallVec<[(RemoteVersion<'a>, SmallVec<[RawPair<'a, T>; 2]>); 4]>;
 
